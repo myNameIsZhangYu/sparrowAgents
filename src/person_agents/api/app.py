@@ -26,6 +26,7 @@ from person_agents.security.context import RequestContext
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    # 应用启动时构建一次默认依赖服务，注入到请求上下文，避免每个请求重建资源。
     application.state.graph_services = GraphServices.default()
     yield
 
@@ -36,8 +37,10 @@ app.include_router(admin_router)
 
 async def current_context(x_api_key: str | None = Header(default=None)) -> RequestContext:
     try:
+        # 将 API Key 解析成租户、用户、角色和会话上下文。
         return resolve_request_context(x_api_key)
     except SecurityError as exc:
+        # 认证失败统一转换为 401，避免泄露内部凭证错误细节。
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
@@ -61,7 +64,9 @@ async def metrics_middleware(request, call_next):
     )
 
     started = time.perf_counter()
+    # 继续执行后续路由和中间件。
     response = await call_next(request)
+    # 已匹配路由时使用 route 模板，避免高基数 URL 污染 Prometheus。
     route = request.scope.get("route")
     endpoint = getattr(route, "path", request.url.path)
     http_requests_total.labels(request.method, endpoint, str(response.status_code)).inc()
@@ -87,6 +92,7 @@ async def readyz() -> Response:
 
     dependencies: dict[str, str] = {}
     try:
+        # 刷新任务队列指标，同时确认任务后端当前可查询。
         sqlite_queue_depth.set(_store.queue_depth())
         sqlite_running_jobs.set(_store.running_depth())
         sqlite_dead_letter_jobs.set(_store.dead_letter_depth())
@@ -96,6 +102,7 @@ async def readyz() -> Response:
         dependencies["postgres" if settings.postgres_dsn else "sqlite"] = "failed"
     if settings.redis_url:
         try:
+            # Redis 承载限流和取消信号，必须参与就绪检查。
             _state_store.get_json("readyz")
             dependencies["redis"] = "ok"
         except redis.RedisError:
@@ -116,6 +123,7 @@ async def metrics() -> Response:
 
 @app.post("/confirmations/{token}/confirm")
 async def confirm_tool(token: str, context: RequestContext = _context_dependency) -> dict[str, bool]:
+    # 读取确认令牌，但不消费它；真正的工具执行方稍后仍需使用同一令牌。
     confirmation = _confirmations.get(token)
     if confirmation is None or confirmation.owner_user_id != context.user_id or confirmation.tenant_id != context.tenant_id:
         raise HTTPException(status_code=404, detail="Confirmation not found")
@@ -124,6 +132,7 @@ async def confirm_tool(token: str, context: RequestContext = _context_dependency
 
 @app.post("/confirmations/{token}/reject")
 async def reject_tool(token: str, context: RequestContext = _context_dependency) -> dict[str, bool]:
+    # 拒绝时立即消费令牌，防止令牌被重复确认。
     confirmation = _confirmations.consume(token)
     if confirmation is None or confirmation.owner_user_id != context.user_id or confirmation.tenant_id != context.tenant_id:
         raise HTTPException(status_code=404, detail="Confirmation not found")
@@ -135,14 +144,17 @@ async def create_run(
     request: RunRequest,
     context: RequestContext = _context_dependency,
 ) -> RunResponse:
+    # 请求会话优先于认证上下文中的新会话，便于客户端连续跟踪同一任务。
     session_id = request.session_id or context.session_id
     scoped_context = RequestContext(user_id=context.user_id, tenant_id=context.tenant_id, session_id=session_id)
     try:
+        # 先检查累计配额，再占用并发槽位。
         _rate_limiter.check_usage(context.user_id, context.tenant_id)
         slot_id = _rate_limiter.allow_run(context.user_id, context.tenant_id)
     except QuotaExceededError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     try:
+        # 同步接口限制最长等待时间，超时后释放槽位并返回 504。
         result = await asyncio.wait_for(
             _run_graph(request.prompt, session_id=session_id, context=scoped_context, services=getattr(app.state, "graph_services", None)),
             timeout=settings.run_timeout_s,
@@ -152,9 +164,11 @@ async def create_run(
     except LLMFallbackError as exc:
         raise HTTPException(status_code=503, detail="LLM providers unavailable") from exc
     finally:
+        # 无论成功、超时还是异常，都必须归还并发配额。
         _rate_limiter.release_run_slot(slot_id, context.user_id, context.tenant_id)
 
     tool_results = result.get("tool_results", [])
+    # 输出取最后一个执行结果；确认请求需要隐藏业务输出并返回确认令牌。
     output = tool_results[-1].get("output") if tool_results else None
     confirmation_token = None
     status = result.get("status") or "completed"

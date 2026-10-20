@@ -8,6 +8,7 @@ from person_agents.memory.sqlite_store import SQLiteStore
 
 
 class JobStore(Protocol):
+    # 让 API/worker 依赖统一任务契约，而不是具体 SQLite 或 PostgreSQL 类型。
     def create_run(
         self,
         run_id: str,
@@ -41,6 +42,7 @@ class JobStore(Protocol):
 
 class AsyncPostgresJobAdapter:
     def __init__(self, store: PostgresStore | None = None):
+        # 该适配器把异步 PostgreSQL 方法暴露为同步接口，供 readiness 等旧边界使用。
         self.store = store or PostgresStore()
 
     def create_run(self, *args, **kwargs):
@@ -75,6 +77,7 @@ def run_coroutine(awaitable):
     import asyncio
     import contextvars
 
+    # 在独立线程/loop 中执行协程，避免嵌套 asyncio.run 破坏 FastAPI 主 loop。
     loop = asyncio.new_event_loop()
     try:
         context = contextvars.copy_context()
@@ -86,5 +89,6 @@ def run_coroutine(awaitable):
 
 def create_job_store():
     if settings.postgres_dsn:
+        # API 与 worker 都使用同一选择规则，避免写入/读取后端分裂。
         return PostgresStore()
     return SQLiteStore()

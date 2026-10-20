@@ -18,7 +18,9 @@ app = typer.Typer(name="person-agents", help="Personal agent CLI")
 console = Console()
 logger = structlog.get_logger()
 
+
 def _signal_handler(sig: int, frame: object) -> None:
+    # 记录优雅退出信号后直接结束 CLI 进程。
     logger.info("graceful_shutdown", signal=sig)
     sys.exit(0)
 
@@ -37,12 +39,14 @@ def doctor(
     setup_logging()
     checks: list[tuple[str, bool, str]] = []
 
+    # doctor 检查本地资源、静态配置和外部依赖健康。
     checks.append(("OpenAI API key", bool(settings.openai_api_key), "not set" if not settings.openai_api_key else "ok"))
     checks.append(("Data directory", settings.data_dir.exists(), str(settings.data_dir)))
     checks.append(("SQLite path writable", _check_write(settings.sqlite_path.parent), str(settings.sqlite_path)))
 
     try:
         import httpx
+        # Ollama 探测只检查 /api/tags，不发起昂贵推理。
         resp = httpx.get(settings.ollama_base_url + "/api/tags", timeout=3)
         checks.append(("Ollama", resp.status_code == 200, settings.ollama_base_url))
     except httpx.HTTPError:
@@ -55,6 +59,7 @@ def doctor(
     if production:
         from person_agents.config.validation import ConfigurationError, validate_production_settings
 
+        # production 模式启用严格配置门，失败直接非零退出。
         try:
             validate_production_settings(settings)
             console.print("  [green]✓[/green] Production configuration: ok")
@@ -65,6 +70,7 @@ def doctor(
 
 def _check_write(path) -> bool:
     try:
+        # 创建并删除探针文件，验证真实文件系统写权限。
         path.mkdir(parents=True, exist_ok=True)
         test_file = path / ".write_test"
         test_file.touch()
@@ -87,6 +93,7 @@ def eval(
     async def _eval():
         from person_agents.eval.storage import EvalStorage
 
+        # eval 报告输出后可选保存；设置 threshold 时作为质量门。
         runner = EvalRunner()
         report = await runner.run_all(BASELINE_CASES)
         rendered = json.dumps(report, ensure_ascii=False, indent=2)
@@ -130,6 +137,7 @@ def migrate() -> None:
     """Bootstrap PostgreSQL runtime schemas."""
     from person_agents.runtime.startup import wait_for_migrations
 
+    # 迁移入口独立于 serve，保证部署顺序可控。
     asyncio.run(wait_for_migrations())
 
 
@@ -143,6 +151,7 @@ def run(
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
+    # 当前 CLI tracker 只用于会话展示，不参与服务端配额。
     CostTracker(session_id="cli-session")
 
     async def _run():
@@ -160,6 +169,7 @@ async def _run_agent_prompt(prompt: str, session_id: str) -> str:
     from person_agents.graph.runtime import GraphServices
     from person_agents.security.context import RequestContext
 
+    # CLI 使用默认服务组合；run_graph 内部仍处理 fast reply 与循环守卫。
     result = await run_graph(
         prompt,
         session_id=session_id,
@@ -181,6 +191,7 @@ def chat() -> None:
     async def _chat() -> None:
         while True:
             try:
+                # Rich input 是阻塞 API，放入线程避免卡住事件循环。
                 user_input = await asyncio.to_thread(console.input, "[bold blue]> [/bold blue]")
                 if not user_input.strip():
                     continue

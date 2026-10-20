@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class AgentEvalCase:
+    # 通过固定 mock/输入和期望 history，验证多 agent 拓扑而非只看文本。
     name: str
     input: str
     intent_response: str
@@ -13,6 +14,7 @@ class AgentEvalCase:
 
 
 def production_agent_cases() -> list[AgentEvalCase]:
+    # 覆盖 chat、memory 和 tool 三条核心路由。
     return [
         AgentEvalCase(
             name="supervisor_routes_chat",

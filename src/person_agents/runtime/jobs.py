@@ -8,6 +8,7 @@ class JobManager:
     def __init__(self, store: SQLiteStore) -> None:
         self.store = store
         if not isinstance(store, SQLiteStore):
+            # 非 SQLite store 不做配置注册表回退。
             self.registry = None
         else:
             from person_agents.runtime.config_registry import ConfigRegistry
@@ -15,6 +16,7 @@ class JobManager:
             self.registry = ConfigRegistry(store)
 
     def create(self, prompt: str, owner_user_id: str, tenant_id: str, session_id: str, provenance: dict[str, str] | None = None) -> str:
+        # 生成服务端 run_id，客户端不能控制任务主键。
         run_id = str(uuid.uuid4())
         self.store.create_run(run_id, prompt, owner_user_id, tenant_id, session_id, provenance=provenance)
         return run_id
@@ -36,6 +38,7 @@ class JobManager:
 
     async def default_provenance(self) -> dict[str, str]:
         if self.registry is None:
+            # 没有 registry 时使用静态版本，保证每次 run 仍可追溯。
             versions = {
                 "prompt": settings.prompt_version,
                 "tool": settings.tool_config_version,

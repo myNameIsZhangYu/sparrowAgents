@@ -3,6 +3,7 @@ from typing import Any, Protocol, runtime_checkable
 
 @runtime_checkable
 class RunStore(Protocol):
+    # 运行任务存储最小契约，便于替换 SQLite/PostgreSQL 实现。
     def create_run(
         self,
         run_id: str,
@@ -35,6 +36,7 @@ class RunStore(Protocol):
 
 @runtime_checkable
 class MemoryStore(Protocol):
+    # 结构化记忆契约；语义检索由向量库另行实现。
     def upsert(self, key: str, value: str, category: str = "fact", owner_user_id: str = "local", tenant_id: str = "default") -> None: ...
     def get(self, key: str, owner_user_id: str = "local", tenant_id: str = "default") -> dict[str, Any] | None: ...
     def search(self, query: str, category: str | None = None, limit: int = 10, owner_user_id: str = "local", tenant_id: str = "default") -> list[dict[str, Any]]: ...

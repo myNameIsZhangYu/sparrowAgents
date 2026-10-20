@@ -7,10 +7,12 @@ from person_agents.memory.sqlite_store import SQLiteStore
 
 class EvalStorage:
     def __init__(self, store: SQLiteStore | None = None):
+        # 复用 SQLite 连接；测试可传临时库。
         self.store = store or SQLiteStore()
 
     def save_result(self, report: dict, model: str = "unknown") -> str:
         conn = self.store.connect()
+        # 时间 + 模型组成 ID，可按评估批次追溯历史报告。
         result_id = datetime.now(UTC).isoformat() + "_" + model
         conn.execute(
             """CREATE TABLE IF NOT EXISTS eval_results (
@@ -24,6 +26,7 @@ class EvalStorage:
             )"""
         )
         conn.execute(
+            # 完整 JSON report 保留每条用例结果，便于回归比较。
             "INSERT INTO eval_results (id,created_at,model,prompt_version,pass_rate,total_tokens,report) VALUES (?,?,?,?,?,?,?)",
             (
                 result_id,
@@ -55,5 +58,6 @@ class EvalStorage:
         }
 
     def compare(self, threshold: float) -> bool:
+        # 读取最近一次报告并和阈值比较，作为 eval gate。
         latest = self.latest()
         return latest is not None and latest["pass_rate"] >= threshold

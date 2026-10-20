@@ -14,6 +14,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # 初始 schema 只包含结构化记忆与会话；任务表由运行时 bootstrap 补齐。
     op.create_table(
         "memories",
         sa.Column("id", sa.Integer, primary_key=True),
@@ -35,5 +36,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # downgrade 会删除数据，仅用于本地清理。
     op.drop_table("sessions")
     op.drop_table("memories")

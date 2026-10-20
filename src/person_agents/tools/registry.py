@@ -12,6 +12,7 @@ logger = structlog.get_logger()
 
 @dataclass
 class ToolDef:
+    # 工具定义是 planner 能看到的稳定契约：schema 决定参数，handler 是唯一执行入口。
     name: str
     description: str
     parameters: dict[str, Any]
@@ -21,6 +22,7 @@ class ToolDef:
 
 class ToolRegistry:
     def __init__(self) -> None:
+        # 以工具名做唯一键，防止重复注册导致模型选择歧义。
         self._tools: dict[str, ToolDef] = {}
 
     def register(self, tool: ToolDef) -> None:
@@ -34,6 +36,7 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def to_openai_schema(self) -> list[dict[str, Any]]:
+        # 转换为 OpenAI function calling 使用的 JSON Schema。
         return [
             {
                 "type": "function",
@@ -48,10 +51,12 @@ class ToolRegistry:
 
 
 def register_default_tools(registry: ToolRegistry, workspace_root: str = "/tmp/person-agents-workspace") -> None:
+    # 两个默认工具都属于高风险操作，因此要求一次性人工确认。
     fs = MCPFilesystemTool(root_dir=workspace_root)
     sandbox = DockerSandbox()
 
     async def fs_handler(arguments: dict) -> dict:
+        # 文件系统工具内部负责 root 路径校验。
         return await fs.call(arguments)
 
     registry.register(ToolDef(
@@ -72,7 +77,9 @@ def register_default_tools(registry: ToolRegistry, workspace_root: str = "/tmp/p
 
     async def shell_handler(arguments: dict) -> dict:
         command = arguments.get("command", "")
+        # shell 命令必须在无网络、有资源上限的 Docker 容器中执行。
         result = await sandbox.execute(command)
+        # 限制输出长度，避免日志/上下文被大输出撑爆。
         return {"exit_code": result.exit_code, "stdout": result.stdout[:500], "stderr": result.stderr[:500]}
 
     registry.register(ToolDef(

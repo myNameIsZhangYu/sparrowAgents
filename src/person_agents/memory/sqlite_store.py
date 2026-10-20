@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS config_versions (
 """
 
 MIGRATIONS = [
+    # 兼容旧库的轻量迁移；新库由 SCHEMA 直接创建这些列。
     "ALTER TABLE runs ADD COLUMN lease_owner TEXT",
     "ALTER TABLE runs ADD COLUMN lease_expires_at TEXT",
     "ALTER TABLE runs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
@@ -78,6 +79,7 @@ MIGRATIONS = [
 
 class SQLiteStore:
     def __init__(self, db_path: Path | None = None):
+        # 单机路径保留默认 settings，测试可传临时库路径隔离。
         self.db_path = db_path or settings.sqlite_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
@@ -85,11 +87,13 @@ class SQLiteStore:
     def connect(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(str(self.db_path))
+            # WAL 提高并发读写能力；外键约束保证后续扩展的数据一致性。
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
             for migration in MIGRATIONS:
                 try:
+                    # ALTER TABLE 无 IF NOT EXISTS；重复迁移错误可安全忽略。
                     self._conn.execute(migration)
                 except sqlite3.OperationalError:
                     pass
@@ -115,6 +119,7 @@ class SQLiteStore:
 
     def upsert(self, key: str, value: str, category: str = "fact", owner_user_id: str = "local", tenant_id: str = "default") -> None:
         conn = self.connect()
+        # 唯一键包含 tenant + owner + key，实现记忆隔离和幂等更新。
         conn.execute(
             """INSERT INTO memories (key, owner_user_id, tenant_id, value, category) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(tenant_id, owner_user_id, key) DO UPDATE SET value=excluded.value, category=excluded.category,
@@ -135,6 +140,7 @@ class SQLiteStore:
 
     def search(self, query: str, category: str | None = None, limit: int = 10, owner_user_id: str = "local", tenant_id: str = "default") -> list[dict[str, Any]]:
         conn = self.connect()
+        # SQLite 先提供 LIKE 文本检索；语义检索由 Chroma 向量库承担。
         sql = "SELECT id, key, value, category FROM memories WHERE value LIKE ? AND owner_user_id=? AND tenant_id=?"
         params: list[Any] = [f"%{query}%", owner_user_id, tenant_id]
         if category:
@@ -231,12 +237,14 @@ class SQLiteStore:
     def claim_next_run(self, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
         conn = self.connect()
         now = datetime.now(UTC)
+        # 先回收过期 lease，让崩溃 worker 的任务可重新被认领。
         conn.execute(
             """UPDATE runs SET status='queued', lease_owner=NULL, lease_expires_at=NULL
                WHERE status='running' AND lease_expires_at IS NOT NULL AND datetime(lease_expires_at) < datetime(?)""",
             (now.isoformat(),),
         )
         conn.commit()
+        # BEGIN IMMEDIATE 减少多 worker 同时抢同一任务的概率。
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """SELECT run_id, tenant_id, owner_user_id, session_id, prompt, attempts FROM runs
@@ -249,6 +257,7 @@ class SQLiteStore:
             return None
         run_id, tenant_id, owner_user_id, session_id, prompt, attempts = row
         expires = now + timedelta(seconds=lease_seconds)
+        # 认领即增加 attempts，为重试上限和退避提供依据。
         conn.execute(
             "UPDATE runs SET status='running', lease_owner=?, lease_expires_at=?, attempts=attempts+1 WHERE run_id=?",
             (worker_id, expires.isoformat(), run_id),
@@ -258,6 +267,7 @@ class SQLiteStore:
 
     def renew_run_lease(self, run_id: str, worker_id: str, lease_seconds: int = 60) -> bool:
         conn = self.connect()
+        # 只有当前 lease owner 才能续租，防止旧 worker 抢占新 owner。
         expires = datetime.now(UTC) + timedelta(seconds=lease_seconds)
         cursor = conn.execute(
             "UPDATE runs SET lease_expires_at=? WHERE run_id=? AND lease_owner=? AND status='running'",

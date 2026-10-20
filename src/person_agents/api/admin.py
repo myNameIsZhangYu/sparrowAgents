@@ -18,20 +18,25 @@ _audit = create_audit_store()
 
 
 async def require_admin(x_admin_key: str | None = Header(default=None)) -> None:
+    # 管理端每次访问都有独立 request_id，方便追踪凭证操作。
     request_id = uuid.uuid4().hex
     if not x_admin_key or not settings.admin_api_key_hash:
+        # 缺失和未配置都拒绝；拒绝事件写入审计，避免管理面成为盲区。
         await _audit.arecord("admin", "credential_access", status="denied", request_id=request_id)
         raise HTTPException(status_code=401, detail="Admin authentication required")
     if hashlib.sha256(x_admin_key.encode()).hexdigest() != settings.admin_api_key_hash:
+        # 管理端使用独立 key，不与普通用户 API key 复用。
         await _audit.arecord("admin", "credential_access", status="denied", request_id=request_id)
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
 
 def credential_manager() -> CredentialManager:
+    # SQLite 凭证库与主业务库分离，便于权限边界独立。
     return CredentialManager(settings.sqlite_path.parent / "credentials.db")
 
 
 def postgres_credential_store() -> PostgresCredentialStore:
+    # 生产路径使用 PostgreSQL，凭证与审计具备一致部署形态。
     return PostgresCredentialStore()
 
 
@@ -42,6 +47,7 @@ async def create_credential(
     _: None = Depends(require_admin),
 ) -> CredentialResponse:
     if settings.postgres_dsn:
+        # 明文只在创建响应中返回一次，后续仅使用 key_id 轮转/撤销。
         key_id, plaintext = await postgres_credential_store().create(tenant_id, user_id)
     else:
         key_id, plaintext = credential_manager().create(tenant_id, user_id)

@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # pydantic-settings 从环境变量和 .env 读取；类型校验在实例化时执行。
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "person-agents"
@@ -56,6 +57,7 @@ class Settings(BaseSettings):
     nextauth_secret: str = ""
     salt: str = ""
     encryption_key: str = ""
+    # 审计保留天数由部署方按合规要求配置。
     audit_retention_days: int = 90
 
 

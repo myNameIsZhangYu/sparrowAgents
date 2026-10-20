@@ -3,6 +3,7 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 registry = CollectorRegistry()
 
+# 独立 registry 便于测试隔离，也避免污染全局默认指标。
 http_requests_total = Counter(
     "http_requests_total",
     "Total HTTP requests",
@@ -50,6 +51,7 @@ sqlite_queue_depth = Gauge("sqlite_queue_depth", "Queued SQLite jobs", registry=
 sqlite_running_jobs = Gauge("sqlite_running_jobs", "Running SQLite jobs", registry=registry)
 sqlite_dead_letter_jobs = Gauge("sqlite_dead_letter_jobs", "Dead-letter SQLite jobs", registry=registry)
 agent_loop_breaks_total = Counter(
+    # 循环守卫触发次数是判断 planner / critic 稳定性的关键信号。
     "agent_loop_breaks_total",
     "Agent loops stopped by the long-running guard",
     ["reason"],

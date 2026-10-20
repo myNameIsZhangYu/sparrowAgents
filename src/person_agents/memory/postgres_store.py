@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS runs (
 
 class PostgresStore:
     def __init__(self, dsn: str | None = None):
+        # asyncpg 引擎带连接池，适配 API 与 worker 并发访问。
         self.dsn = dsn or settings.postgres_dsn
         self.engine: AsyncEngine = create_async_engine(
             self.dsn,
@@ -61,6 +62,7 @@ class PostgresStore:
 
     async def bootstrap(self) -> None:
         async with self.engine.begin() as conn:
+            # 幂等建表/建索引，迁移服务与运行时都可安全调用。
             for statement in SCHEMA_STATEMENTS:
                 await conn.execute(text(statement))
 
@@ -76,6 +78,7 @@ class PostgresStore:
     ) -> None:
         provenance = provenance or {}
         async with self.engine.begin() as conn:
+            # 保存 prompt/agent/prompt/tool/policy 版本，保证结果可追溯。
             await conn.execute(
                 text(
                     """INSERT INTO runs (
@@ -114,6 +117,7 @@ class PostgresStore:
         async with self.engine.begin() as conn:
             result = await conn.execute(
                 text(
+                    # token 和 cost 使用累加更新，同一 run 多阶段统计不会互相覆盖。
                     """UPDATE runs SET status=:status,output=:output,confirmation_token=:confirmation_token,
                         error=:error,total_tokens=total_tokens+:total_tokens,
                         total_cost_usd=total_cost_usd+:total_cost,updated_at=now()
@@ -147,6 +151,7 @@ class PostgresStore:
         async with self.engine.begin() as conn:
             await conn.execute(
                 text(
+                    # 唯一键包含 tenant/owner/key，实现租户内幂等记忆更新。
                     """INSERT INTO memories (key,value,category,owner_user_id,tenant_id)
                         VALUES (:key,:value,:category,:owner_user_id,:tenant_id)
                         ON CONFLICT (tenant_id,owner_user_id,key)
@@ -169,6 +174,7 @@ class PostgresStore:
 
     async def claim_next_run(self, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
         async with self.engine.begin() as conn:
+            # 第一步回收过期 lease，防止 worker 崩溃后任务永久卡住。
             await conn.execute(
                 text(
                     """UPDATE runs SET status='queued', lease_owner=NULL, lease_expires_at=NULL
@@ -178,6 +184,7 @@ class PostgresStore:
             row = (
                 await conn.execute(
                     text(
+                    # FOR UPDATE SKIP LOCKED 是多 worker 并发认领的关键。
                         """UPDATE runs SET status='running', lease_owner=:worker_id,
                             lease_expires_at=:expires_at, attempts=attempts+1
                             WHERE run_id = (

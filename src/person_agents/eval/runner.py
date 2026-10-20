@@ -13,6 +13,7 @@ logger = structlog.get_logger()
 
 @dataclass
 class EvalCase:
+    # 简单文本评估：只要求响应包含关键片段。
     name: str
     input: str
     expected_contains: str
@@ -21,11 +22,13 @@ class EvalCase:
 
 class EvalRunner:
     def __init__(self) -> None:
+        # eval 独立计费，避免污染在线用户用量。
         self.tracker = CostTracker(session_id="eval")
 
     async def run_case(self, case: EvalCase) -> dict[str, Any]:
         messages = [{"role": "user", "content": case.input}]
         try:
+            # 直接调用 fallback 链，用于检查模型可用性与基础输出质量。
             resp = await call_with_fallback(messages)
             self.tracker.record(resp.model, resp.prompt_tokens, resp.completion_tokens, 0)
             passed = case.expected_contains.lower() in resp.content.lower()
@@ -36,9 +39,11 @@ class EvalRunner:
     async def run_agent_case(self, case: AgentEvalCase) -> dict[str, Any]:
         from person_agents.graph.engine import run_graph
 
+        # eval 使用固定租户/会话，便于识别并隔离测试数据。
         context = RequestContext(user_id="eval", tenant_id="eval", session_id=f"eval-{case.name}")
         try:
             state = await run_graph(case.input, session_id=context.session_id, context=context)
+            # 多 agent 评估不仅看结果，还看完整路由历史是否符合拓扑预期。
             passed = tuple(state.get("agent_history", [])) == case.expected_agent_history and state.get("status", "success") == case.expected_status
             return {
                 "name": case.name,
@@ -51,6 +56,7 @@ class EvalRunner:
             return {"name": case.name, "passed": False, "output": str(exc), "degraded": True}
 
     async def run_agent_cases(self, cases: list[AgentEvalCase] | None = None) -> dict[str, Any]:
+        # 批量运行并输出通过率、失败数和 token 消耗，作为 CI/发布质量门。
         cases = cases or production_agent_cases()
         results = [await self.run_agent_case(case) for case in cases]
         total = len(results)
@@ -66,6 +72,7 @@ class EvalRunner:
         }
 
     async def run_all(self, cases: list[EvalCase]) -> dict[str, Any]:
+        # 基础文本评估入口，与多 agent 拓扑评估分开。
         results = [await self.run_case(c) for c in cases]
         total = len(results)
         passed = sum(r["passed"] for r in results)
