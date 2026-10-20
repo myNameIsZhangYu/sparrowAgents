@@ -1,16 +1,23 @@
 services:
   app:
+    profiles: ["default"]
     build:
       context: .
       dockerfile: Dockerfile.app
     command: ["serve"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
-      - .env
+      - .env.compose
     environment:
       PERSON_AGENTS_DATA_DIR: /data
       PERSON_AGENTS_SQLITE_PATH: /data/memory.db
       PERSON_AGENTS_CHROMA_PATH: /data/chroma
       LANGFUSE_HOST: http://langfuse:3000
+      API_KEY_HASH: ${API_KEY_HASH:?set API_KEY_HASH}
+      ADMIN_API_KEY_HASH: ${ADMIN_API_KEY_HASH:?set ADMIN_API_KEY_HASH}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      POSTGRES_DSN: ${POSTGRES_DSN:-}
     volumes:
       - app_data:/data
     restart: unless-stopped
@@ -24,22 +31,47 @@ services:
     depends_on:
       langfuse:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
 
+  migrate:
+    profiles: ["default", "postgres"]
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    command: ["migrate"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env.compose
+    environment:
+      POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-person_agents}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-person_agents}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    restart: "no"
+
   worker:
+    profiles: ["default"]
     build:
       context: .
       dockerfile: Dockerfile.app
     command: ["worker"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
-      - .env
+      - .env.compose
     environment:
       PERSON_AGENTS_DATA_DIR: /data
       PERSON_AGENTS_SQLITE_PATH: /data/memory.db
       PERSON_AGENTS_CHROMA_PATH: /data/chroma
       LANGFUSE_HOST: http://langfuse:3000
-      PERSON_AGENTS_REDIS_URL: redis://redis:6379/0
+      API_KEY_HASH: ${API_KEY_HASH:?set API_KEY_HASH}
+      ADMIN_API_KEY_HASH: ${ADMIN_API_KEY_HASH:?set ADMIN_API_KEY_HASH}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      POSTGRES_DSN: ${POSTGRES_DSN:-}
     volumes:
       - app_data:/data
     restart: unless-stopped
@@ -48,12 +80,18 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3; sqlite3.connect('/data/memory.db').execute('select 1')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     depends_on:
       redis:
         condition: service_healthy
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
@@ -65,7 +103,8 @@ services:
       retries: 5
 
   langfuse-db:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine
+    profiles: ["observability"]
     environment:
       POSTGRES_USER: langfuse
       POSTGRES_PASSWORD: langfuse
@@ -79,7 +118,8 @@ services:
       retries: 5
 
   langfuse-clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:24.8-alpine
+    profiles: ["observability"]
     cap_add:
       - SYS_NICE
     environment:
@@ -100,6 +140,7 @@ services:
 
   langfuse-redis:
     image: redis:7-alpine
+    profiles: ["observability"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -108,6 +149,7 @@ services:
 
   langfuse-minio:
     image: chrislusf/seaweedfs:latest
+    profiles: ["observability"]
     command: server -ip.bind=0.0.0.0 -s3 -s3.port=9000 -s3.ip.bind=0.0.0.0 -s3.autoCreateBucket -master.volumeSizeLimitMB=1024 -volume.max=0 -volume.preStopSeconds=10
     environment:
       WEED_S3_ACCESS_KEY: minioadmin
@@ -122,7 +164,8 @@ services:
       start_period: 15s
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:latest
+    image: langfuse/langfuse-worker:2
+    profiles: ["observability"]
     depends_on:
       langfuse-db:
         condition: service_healthy
@@ -134,8 +177,8 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
-      SALT: f004ef0fd6841ff3a4c0bc75ba17a94eb7c61873e414c8cd04b61eea9f7bf14e
-      ENCRYPTION_KEY: 191e1d74dcf31d0e20332292642f2b40fb944d1095b6fd3c29d59ac217794e89
+      SALT: ${LANGFUSE_SALT:?set LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?set LANGFUSE_ENCRYPTION_KEY}
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_USER: langfuse
       CLICKHOUSE_PASSWORD: langfuse
@@ -143,14 +186,14 @@ services:
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_ACCESS_KEY_ID:?set LANGFUSE_S3_ACCESS_KEY_ID}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_SECRET_ACCESS_KEY:?set LANGFUSE_S3_SECRET_ACCESS_KEY}
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
       LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minioadmin
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_ACCESS_KEY_ID}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_SECRET_ACCESS_KEY}
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       REDIS_HOST: langfuse-redis
@@ -158,7 +201,7 @@ services:
       LANGFUSE_MIGRATION_V4_WRITE_MODE: dual
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.53.0
     profiles: ["monitoring"]
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -167,7 +210,7 @@ services:
       - "9090:9090"
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.1.0
     profiles: ["monitoring"]
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
@@ -181,7 +224,7 @@ services:
       - prometheus
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine
     profiles: ["postgres"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
@@ -202,7 +245,8 @@ services:
           memory: 512M
 
   langfuse:
-    image: langfuse/langfuse:latest
+    image: langfuse/langfuse:2
+    profiles: ["observability"]
     ports:
       - "3000:3000"
     depends_on:
@@ -217,9 +261,9 @@ services:
     environment:
       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
       NEXTAUTH_URL: http://localhost:3000
-      NEXTAUTH_SECRET: 945719b6afabf3d298e71ecc71acdc90f3184708b702b18769c2bb5dd31ea16e
-      SALT: f004ef0fd6841ff3a4c0bc75ba17a94eb7c61873e414c8cd04b61eea9f7bf14e
-      ENCRYPTION_KEY: 191e1d74dcf31d0e20332292642f2b40fb944d1095b6fd3c29d59ac217794e89
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
+      SALT: ${LANGFUSE_SALT:?set LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?set LANGFUSE_ENCRYPTION_KEY}
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_USER: langfuse
       CLICKHOUSE_PASSWORD: langfuse

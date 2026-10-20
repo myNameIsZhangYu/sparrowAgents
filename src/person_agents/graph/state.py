@@ -17,3 +17,5 @@ class AgentState(TypedDict):
     session_id: str
     tenant_id: str
     owner_user_id: str
+    current_agent: str
+    agent_history: list[str]

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -5,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from person_agents.config.settings import settings
 
-SCHEMA = """
+SCHEMA_STATEMENTS = (
+    """
 CREATE TABLE IF NOT EXISTS memories (
     id BIGSERIAL PRIMARY KEY,
     key TEXT NOT NULL,
@@ -17,6 +19,8 @@ CREATE TABLE IF NOT EXISTS memories (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(tenant_id, owner_user_id, key)
 );
+    """,
+    """
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -27,6 +31,9 @@ CREATE TABLE IF NOT EXISTS runs (
     output TEXT,
     confirmation_token TEXT,
     error TEXT,
+    lease_owner TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    next_retry_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -38,8 +45,9 @@ CREATE TABLE IF NOT EXISTS runs (
     total_tokens INTEGER NOT NULL DEFAULT 0,
     total_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0.0
 );
-CREATE INDEX IF NOT EXISTS idx_runs_owner_pg ON runs(tenant_id, owner_user_id, status);
-"""
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_runs_owner_pg ON runs(tenant_id, owner_user_id, status)",
+)
 
 
 class PostgresStore:
@@ -53,7 +61,8 @@ class PostgresStore:
 
     async def bootstrap(self) -> None:
         async with self.engine.begin() as conn:
-            await conn.execute(text(SCHEMA))
+            for statement in SCHEMA_STATEMENTS:
+                await conn.execute(text(statement))
 
     async def create_run(
         self,
@@ -149,3 +158,52 @@ class PostgresStore:
     async def depth(self, status: str) -> int:
         async with self.engine.connect() as conn:
             return int((await conn.execute(text("SELECT count(*) FROM runs WHERE status=:status"), {"status": status})).scalar_one())
+
+    async def defer_run_retry(self, run_id: str, next_retry_at: datetime) -> bool:
+        async with self.engine.begin() as conn:
+            result = await conn.execute(
+                text("UPDATE runs SET next_retry_at=:next_retry_at WHERE run_id=:run_id"),
+                {"next_retry_at": next_retry_at, "run_id": run_id},
+            )
+            return result.rowcount > 0
+
+    async def claim_next_run(self, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """UPDATE runs SET status='queued', lease_owner=NULL, lease_expires_at=NULL
+                       WHERE status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now()"""
+                )
+            )
+            row = (
+                await conn.execute(
+                    text(
+                        """UPDATE runs SET status='running', lease_owner=:worker_id,
+                            lease_expires_at=:expires_at, attempts=attempts+1
+                            WHERE run_id = (
+                                SELECT run_id FROM runs
+                                WHERE status='queued'
+                                  AND (next_retry_at IS NULL OR next_retry_at <= now())
+                                ORDER BY created_at
+                                FOR UPDATE SKIP LOCKED LIMIT 1
+                            )
+                            RETURNING run_id,tenant_id,owner_user_id,session_id,prompt,attempts"""
+                    ),
+                    {
+                        "worker_id": worker_id,
+                        "expires_at": datetime.now(UTC) + timedelta(seconds=lease_seconds),
+                    },
+                )
+            ).first()
+        return dict(row._mapping) if row else None
+
+    async def renew_run_lease(self, run_id: str, worker_id: str, lease_seconds: int = 60) -> bool:
+        async with self.engine.begin() as conn:
+            result = await conn.execute(
+                text(
+                    """UPDATE runs SET lease_expires_at=:expires_at
+                       WHERE run_id=:run_id AND lease_owner=:worker_id AND status='running'"""
+                ),
+                {"expires_at": datetime.now(UTC) + timedelta(seconds=lease_seconds), "run_id": run_id, "worker_id": worker_id},
+            )
+            return result.rowcount > 0

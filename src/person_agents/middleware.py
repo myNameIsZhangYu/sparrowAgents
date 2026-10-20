@@ -11,7 +11,7 @@ import jsonschema
 import structlog
 
 from person_agents.config.settings import settings
-from person_agents.governance.audit import AuditLogger
+from person_agents.governance.audit_store import create_audit_store
 from person_agents.governance.policy import Permission, PolicyEngine
 from person_agents.governance.rate_limiter import RateLimiter
 from person_agents.observability.langfuse import trace_llm_call
@@ -25,7 +25,7 @@ logger = structlog.get_logger()
 _policy = PolicyEngine()
 _state_store = create_state_store(settings.redis_url)
 _rate_limiter = RateLimiter(_state_store)
-_audit = AuditLogger()
+_audit = create_audit_store()
 _confirmations = ConfirmationStore(_state_store)
 
 def _configure_policy() -> None:
@@ -52,42 +52,42 @@ async def governed_tool_call(
     owner = context.user_id
     tenant = context.tenant_id
     if not _rate_limiter.allow_tool(owner, tenant):
-        _audit.record("middleware", f"tool:{tool_name}", str(arguments), status="rate_limited", request_id=request_id, owner_user_id=owner, tenant_id=tenant)
+        await _audit.arecord("middleware", f"tool:{tool_name}", str(arguments), status="rate_limited", request_id=request_id, owner_user_id=owner, tenant_id=tenant)
         raise RuntimeError(f"Tool call rate limited: {tool_name}")
 
     if tool_schema:
         try:
             jsonschema.validate(arguments, tool_schema)
         except jsonschema.ValidationError as exc:
-            _audit.record("middleware", f"tool:{tool_name}", str(arguments), status="invalid_arguments", error=exc.message, request_id=request_id, owner_user_id=owner, tenant_id=tenant)
+            await _audit.arecord("middleware", f"tool:{tool_name}", str(arguments), status="invalid_arguments", error=exc.message, request_id=request_id, owner_user_id=owner, tenant_id=tenant)
             raise ValueError(f"Invalid arguments for {tool_name}: {exc.message}") from exc
 
     required_permission = Permission.SHELL if "sandbox" in tool_name else Permission.WRITE if "write" in str(arguments.get("operation", "")) else Permission.READ
     if not _policy.check(required_permission):
-        _audit.record("middleware", f"tool:{tool_name}", str(arguments), status="permission_denied", request_id=request_id, owner_user_id=owner, tenant_id=tenant)
+        await _audit.arecord("middleware", f"tool:{tool_name}", str(arguments), status="permission_denied", request_id=request_id, owner_user_id=owner, tenant_id=tenant)
         raise PermissionError(f"Permission denied for {required_permission.value}: {tool_name}")
 
     if tool_name == "shell":
         command = str(arguments.get("command", ""))
         allowed, reason = _policy.check_command(command)
         if not allowed:
-            _audit.record("middleware", f"tool:{tool_name}", command, status="policy_rejected", error=reason, request_id=request_id, owner_user_id=owner, tenant_id=tenant)
+            await _audit.arecord("middleware", f"tool:{tool_name}", command, status="policy_rejected", error=reason, request_id=request_id, owner_user_id=owner, tenant_id=tenant)
             raise PermissionError(reason)
 
     if requires_confirmation:
         if confirmation_token is None:
             confirmation = _confirmations.create(owner, tenant, tool_name, arguments)
-            _audit.record("middleware", f"tool:{tool_name}", str(arguments), status="confirmation_required", request_id=request_id, owner_user_id=owner, tenant_id=tenant)
+            await _audit.arecord("middleware", f"tool:{tool_name}", str(arguments), status="confirmation_required", request_id=request_id, owner_user_id=owner, tenant_id=tenant)
             return {"status": "confirmation_required", "confirmation_token": confirmation.token}
         confirmation = _confirmations.consume(confirmation_token)
         if confirmation is None:
-            _audit.record("middleware", f"tool:{tool_name}", str(arguments), status="invalid_confirmation", request_id=request_id, owner_user_id=owner, tenant_id=tenant)
+            await _audit.arecord("middleware", f"tool:{tool_name}", str(arguments), status="invalid_confirmation", request_id=request_id, owner_user_id=owner, tenant_id=tenant)
             raise PermissionError("Invalid or expired confirmation")
         if confirmation.owner_user_id != owner or confirmation.tenant_id != tenant or confirmation.tool_name != tool_name:
             raise PermissionError("Confirmation does not match request")
 
     result = await handler(arguments)
-    _audit.record("middleware", f"tool:{tool_name}", str(arguments), str(result)[:200], request_id=request_id, owner_user_id=owner, tenant_id=tenant)
+    await _audit.arecord("middleware", f"tool:{tool_name}", str(arguments), str(result)[:200], request_id=request_id, owner_user_id=owner, tenant_id=tenant)
     tool_calls_total.labels(tool_name, "success").inc()
     return result
 
@@ -100,7 +100,7 @@ async def governed_llm_call(
     context = context or RequestContext(user_id="local", tenant_id="default", session_id="cli")
     request_id = uuid.uuid4().hex
     if not _rate_limiter.allow_llm(context.user_id, context.tenant_id):
-        _audit.record("middleware", "llm", "rate limited", status="rate_limited", request_id=request_id, owner_user_id=context.user_id, tenant_id=context.tenant_id)
+        await _audit.arecord("middleware", "llm", "rate limited", status="rate_limited", request_id=request_id, owner_user_id=context.user_id, tenant_id=context.tenant_id)
         raise RuntimeError("LLM call rate limited")
 
     import time
@@ -110,7 +110,7 @@ async def governed_llm_call(
     elapsed_ms = int((time.monotonic() - start) * 1000)
     llm_calls_total.labels("success", str(result.degraded).lower()).inc()
 
-    _audit.record("middleware", "llm", str(messages)[-200:], str(result.content)[:200], "success")
+    await _audit.arecord("middleware", "llm", str(messages)[-200:], str(result.content)[:200], "success")
     trace_llm_call(
         "agent-llm",
         result.model,

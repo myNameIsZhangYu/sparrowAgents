@@ -2,13 +2,17 @@ import uuid
 
 from person_agents.config.settings import settings
 from person_agents.memory.sqlite_store import SQLiteStore
-from person_agents.runtime.config_registry import ConfigRegistry
 
 
 class JobManager:
     def __init__(self, store: SQLiteStore) -> None:
         self.store = store
-        self.registry = ConfigRegistry(store)
+        if not isinstance(store, SQLiteStore):
+            self.registry = None
+        else:
+            from person_agents.runtime.config_registry import ConfigRegistry
+
+            self.registry = ConfigRegistry(store)
 
     def create(self, prompt: str, owner_user_id: str, tenant_id: str, session_id: str, provenance: dict[str, str] | None = None) -> str:
         run_id = str(uuid.uuid4())
@@ -30,8 +34,15 @@ class JobManager:
     def renew_lease(self, run_id: str, worker_id: str, lease_seconds: int = 60) -> bool:
         return self.store.renew_run_lease(run_id, worker_id, lease_seconds)
 
-    def default_provenance(self) -> dict[str, str]:
-        versions = self.registry.register_defaults()
+    async def default_provenance(self) -> dict[str, str]:
+        if self.registry is None:
+            versions = {
+                "prompt": settings.prompt_version,
+                "tool": settings.tool_config_version,
+                "policy": settings.policy_version,
+            }
+        else:
+            versions = self.registry.register_defaults()
         return {
             "agent_version": settings.agent_version,
             "prompt_version": versions["prompt"],

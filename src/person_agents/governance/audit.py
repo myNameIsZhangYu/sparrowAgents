@@ -96,3 +96,9 @@ class AuditLogger:
         cursor = self.connect().execute("DELETE FROM audit_log WHERE timestamp < ?", (cutoff.isoformat(),))
         self._conn.commit()
         return cursor.rowcount
+
+    async def arecord(self, *args, **kwargs) -> None:
+        self.record(*args, **kwargs)
+
+    async def apurge_expired(self, retention_days: int) -> int:
+        return self.purge_expired(retention_days)

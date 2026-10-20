@@ -31,6 +31,8 @@ class VectorStore:
 
     def query(self, text: str, n_results: int = 5, owner_user_id: str = "local", tenant_id: str = "default") -> list[dict[str, Any]]:
         self._ensure_client()
+        if self._collection.count() == 0:
+            return []
         where = {"$and": [{"owner_user_id": {"$eq": owner_user_id}}, {"tenant_id": {"$eq": tenant_id}}]}
         results = self._collection.query(query_texts=[text], n_results=n_results, where=where)
         docs = results.get("documents", [[]])[0]

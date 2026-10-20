@@ -21,6 +21,24 @@ jobs:
         run: uv run ruff check src tests
       - name: Tests
         run: uv run pytest -q
+      - name: Dependency vulnerability audit
+        run: |
+          uv tool run --from pip-audit pip-audit --strict --skip-vulnerable
+      - name: Compose and deployment script validation
+        env:
+          POSTGRES_USER: person_agents
+          POSTGRES_PASSWORD: ci-test-password
+          POSTGRES_DB: person_agents
+          GRAFANA_ADMIN_PASSWORD: ci-test-password
+          LANGFUSE_SALT: 0123456789abcdef0123456789abcdef
+          LANGFUSE_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef1234
+          LANGFUSE_S3_ACCESS_KEY_ID: ci-test-key
+          LANGFUSE_S3_SECRET_ACCESS_KEY: ci-test-secret
+        run: |
+          docker compose config --quiet
+          bash -n scripts/verify_production_stack.sh
+      - name: Build application image
+        run: docker build -f Dockerfile.app -t person-agents:ci-${{ github.sha }} .
       - name: Evaluation Gate (offline)
         if: ${{ vars.RUN_EVAL_GATE == 'true' }}
         run: uv run person-agents eval --threshold "${{ vars.EVAL_THRESHOLD || '0.7' }}"

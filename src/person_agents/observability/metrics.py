@@ -21,6 +21,18 @@ run_jobs_total = Counter(
     ["status"],
     registry=registry,
 )
+agent_runs_total = Counter(
+    "agent_runs_total",
+    "Agent node lifecycle events",
+    ["agent", "status"],
+    registry=registry,
+)
+agent_run_duration_seconds = Histogram(
+    "agent_run_duration_seconds",
+    "Agent node latency",
+    ["agent"],
+    registry=registry,
+)
 tool_calls_total = Counter(
     "tool_calls_total",
     "Governed tool calls",

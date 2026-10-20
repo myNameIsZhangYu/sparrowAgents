@@ -1,7 +1,6 @@
 from typing import Any
 
 import structlog
-from langfuse import propagate_attributes
 
 from person_agents.config.settings import settings
 
@@ -22,6 +21,12 @@ def get_langfuse():
     return _client
 
 
+def _propagate_attributes(**kwargs):
+    from langfuse import propagate_attributes
+
+    return propagate_attributes(**kwargs)
+
+
 def trace_graph_node(
     session_id: str,
     node_name: str,
@@ -34,7 +39,7 @@ def trace_graph_node(
     if client is None:
         return
     try:
-        with propagate_attributes(session_id=session_id, trace_name="agent_graph"), \
+        with _propagate_attributes(session_id=session_id, trace_name="agent_graph"), \
             client.start_as_current_observation(name="agent_graph"), \
             client.start_as_current_observation(name=f"graph_node:{node_name}") as span:
             span.update(

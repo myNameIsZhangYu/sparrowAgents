@@ -1,21 +1,19 @@
 FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    UV_PROJECT_ENVIRONMENT=/opt/venv \
-    UV_COMPILE_BYTECODE=1
+    PYTHONUNBUFFERED=1
 EXPOSE 8000
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
-RUN uv sync --frozen --no-dev --no-install-project
+COPY .wheelhouse/ /app/.wheelhouse/
+RUN python -m venv /opt/venv \
+  && /opt/venv/bin/pip install --no-index --find-links=/app/.wheelhouse \
+    -r /app/.wheelhouse/requirements.txt \
+  && /opt/venv/bin/pip install --no-index --no-deps /app/.wheelhouse/project/*.whl
 
 ENV PATH="/opt/venv/bin:$PATH"
-RUN uv sync --frozen --no-dev --reinstall-package person-agents
+RUN rm -rf /app/.wheelhouse
 
 RUN useradd --create-home appuser && mkdir -p /data && chown -R appuser:appuser /app /data
 USER appuser

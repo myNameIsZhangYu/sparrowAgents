@@ -8,7 +8,6 @@ chroma/
 config/clickhouse/
 alembic.ini
 uv.lock
-.env
 .aws/
 .agents/
 .claude/
@@ -17,7 +16,6 @@ uv.lock
 .wolf/
 .pytest_cache/
 .ruff_cache/
-config/clickhouse/
-alembic.ini
-uv.lock
-__pycache__/
+.wheelhouse/
+.env.compose
+docs/superpowers/

@@ -23,16 +23,19 @@ def resolve_request_context(api_key: str | None) -> RequestContext:
     except (RuntimeError, sqlite3.Error):
         credential = None
     if credential:
+        role = "admin" if credential.role == "admin" else "user"
         return RequestContext(
             user_id=credential.user_id,
             tenant_id=credential.tenant_id,
             session_id=f"session_{uuid.uuid4().hex}",
+            role=role,
         )
     if not settings.api_key_hash or _digest(api_key) != settings.api_key_hash:
         raise SecurityError("Invalid API key")
     user_id = f"user_{_digest(api_key)[:24]}"
     session_id = f"session_{uuid.uuid4().hex}"
-    return RequestContext(user_id=user_id, tenant_id=settings.default_tenant_id, session_id=session_id)
+    role = "admin" if settings.admin_api_key_hash and _digest(api_key) == settings.admin_api_key_hash else "user"
+    return RequestContext(user_id=user_id, tenant_id=settings.default_tenant_id, session_id=session_id, role=role)
 
 
 def resolve_registry_context(api_key: str | None, db_path=None) -> RequestContext:

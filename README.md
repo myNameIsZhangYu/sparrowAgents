@@ -94,7 +94,7 @@
 |---|---|
 | **PolicyEngine** | 权限分级（read/write/shell/network）+ 危险命令黑名单（regex 匹配） |
 | **RateLimiter** | 令牌桶限流（LLM 和工具分别独立） |
-| **AuditLogger** | SQLite 审计日志，记录每次工具调用的输入/输出/状态 |
+| **AuditLogger** | SQLite/PostgreSQL 审计日志，记录每次工具调用的输入/输出/状态 |
 
 危险命令检测支持变形绕过（如 `rm -r -f /`、`git push --force`）。
 
@@ -192,7 +192,8 @@ src/person_agents/
 ├── governance/
 │   ├── policy.py          # 权限 + 危险命令 regex 黑名单
 │   ├── rate_limiter.py    # 令牌桶限流
-│   └── audit.py           # SQLite 审计日志
+│   ├── audit.py           # SQLite 审计日志
+│   └── audit_store.py     # PostgreSQL 审计存储与后端选择
 ├── observability/
 │   ├── langfuse.py        # Langfuse trace 与嵌套节点 span
 │   ├── logging.py         # structlog 配置
@@ -276,14 +277,14 @@ uv run person-agents doctor --production
 
 ### PostgreSQL profile
 
-当前 API 读路径与 `/readyz` 支持通过 `PERSON_AGENTS_POSTGRES_DSN=postgresql+asyncpg://user:password@postgres:5432/person_agents` 启用 PostgreSQL。启动数据库：
+当前运行队列、worker lease、审计、credentials 与 config registry 支持通过 `PERSON_AGENTS_POSTGRES_DSN=postgresql+asyncpg://user:password@postgres:5432/person_agents` 启用 PostgreSQL。启动数据库并执行 schema bootstrap：
 
 ```bash
 POSTGRES_USER=person_agents POSTGRES_PASSWORD=strong-password POSTGRES_DB=person_agents \
   docker compose --profile postgres up -d postgres
 ```
 
-注意：worker lease、审计、credentials、config registry 仍使用 SQLite；完整 PostgreSQL 化将在下一阶段完成。
+PostgreSQL profile 会先运行 `migrate` 一次性服务，再启动 app 与 worker。可用 `scripts/verify_production_stack.sh` 执行基础生产栈验证。
 
 危险工具会返回 `status=confirmation_required` 和一次性 `confirmation_token`。当前 API 核心已实现认证、租户上下文、用户隔离、schema 校验、确认工作流和 `/healthz`；批准/拒绝 endpoint 仍在下一批实现中。
 
@@ -312,3 +313,27 @@ POSTGRES_USER=person_agents POSTGRES_PASSWORD=strong-password POSTGRES_DB=person
 ## License
 
 MIT
+
+## 外部验证开关
+
+- `RUN_LANGGRAPH_E2E=true` 启用被沙箱跳过的 LangGraph 编译图 / 完整执行测试。
+- `RUN_SANDBOX_E2E=true` 启用 Docker sandbox E2E 测试。
+- `PERSON_AGENTS_TEST_POSTGRES_DSN=postgresql+asyncpg://...` 启用 PostgreSQL queue/runtime store 集成测试。
+
+### Docker build network
+
+If dependency downloads stall during image build, use the offline wheelhouse flow:
+
+```bash
+PERSON_AGENTS_API_KEY='your-api-key' \
+PERSON_AGENTS_ADMIN_API_KEY='your-admin-key' \
+./scripts/generate_compose_env.sh .env.compose
+
+./scripts/prepare_wheelhouse.sh .wheelhouse
+docker compose --env-file .env.compose --profile default build app
+docker compose --env-file .env.compose --profile default up -d
+```
+
+If the OpenAI-compatible endpoint, Ollama, or other service runs on the host, rewrite `127.0.0.1` and
+`localhost` to the WSL gateway address in `.env.compose`; `host.docker.internal` may need
+`extra_hosts: ["host.docker.internal:host-gateway"]` depending on Docker Desktop/WSL2 networking.

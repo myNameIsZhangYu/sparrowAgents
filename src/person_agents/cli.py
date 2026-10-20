@@ -118,10 +118,19 @@ def serve(
 def worker() -> None:
     """Run the background agent worker."""
     setup_logging()
-    from person_agents.memory.sqlite_store import SQLiteStore
+    from person_agents.graph.runtime import GraphServices
+    from person_agents.runtime.job_store import create_job_store
     from person_agents.runtime.worker import worker_loop
 
-    asyncio.run(worker_loop(SQLiteStore()))
+    asyncio.run(worker_loop(create_job_store(), services=GraphServices.default()))
+
+
+@app.command()
+def migrate() -> None:
+    """Bootstrap PostgreSQL runtime schemas."""
+    from person_agents.runtime.startup import wait_for_migrations
+
+    asyncio.run(wait_for_migrations())
 
 
 @app.command()
@@ -137,15 +146,27 @@ def run(
     CostTracker(session_id="cli-session")
 
     async def _run():
-        from person_agents.graph.engine import run_graph
-        result = await run_graph(prompt, session_id="cli-run")
-        final_output = result.get("tool_results", [{}])[-1].get("output", "") if result.get("tool_results") else ""
+        final_output = await _run_agent_prompt(prompt, "cli-run")
         if final_output:
             console.print(final_output)
         else:
             console.print("[dim]Task completed.[/dim]")
 
     asyncio.run(_run())
+
+
+async def _run_agent_prompt(prompt: str, session_id: str) -> str:
+    from person_agents.graph.engine import run_graph
+    from person_agents.graph.runtime import GraphServices
+    from person_agents.security.context import RequestContext
+
+    result = await run_graph(
+        prompt,
+        session_id=session_id,
+        context=RequestContext(user_id=session_id, tenant_id="default", session_id=session_id),
+        services=GraphServices.default(),
+    )
+    return result.get("tool_results", [{}])[-1].get("output", "") if result.get("tool_results") else ""
 
 
 @app.command()
@@ -158,15 +179,12 @@ def chat() -> None:
     tracker = CostTracker(session_id="chat-session")
 
     async def _chat() -> None:
-        from person_agents.graph.engine import run_graph
-
         while True:
             try:
                 user_input = await asyncio.to_thread(console.input, "[bold blue]> [/bold blue]")
                 if not user_input.strip():
                     continue
-                result = await run_graph(user_input, session_id="cli-chat")
-                final_output = result.get("tool_results", [{}])[-1].get("output", "") if result.get("tool_results") else ""
+                final_output = await _run_agent_prompt(user_input, "cli-chat")
                 if final_output:
                     console.print(final_output)
             except KeyboardInterrupt:

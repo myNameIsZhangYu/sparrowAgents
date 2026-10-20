@@ -1,6 +1,8 @@
 import asyncio
 import sqlite3
 import time
+import uuid
+from contextlib import asynccontextmanager
 
 import redis
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
@@ -9,15 +11,25 @@ from person_agents.api.admin import router as admin_router
 from person_agents.api.schemas import Provenance, RunAcceptedResponse, RunRequest, RunResponse
 from person_agents.config.settings import settings
 from person_agents.governance.rate_limiter import QuotaExceededError, RateLimiter
+from person_agents.graph.engine import run_graph as _run_graph
+from person_agents.graph.runtime import GraphServices
 from person_agents.memory.postgres_store import PostgresStore
 from person_agents.memory.sqlite_store import SQLiteStore
 from person_agents.middleware import _confirmations
+from person_agents.runtime.job_store import AsyncPostgresJobAdapter
 from person_agents.runtime.jobs import JobManager
 from person_agents.runtime.state import create_state_store
 from person_agents.security.auth import SecurityError, resolve_request_context
 from person_agents.security.context import RequestContext
 
-app = FastAPI(title="person-agents", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    application.state.graph_services = GraphServices.default()
+    yield
+
+
+app = FastAPI(title="person-agents", version="0.1.0", lifespan=lifespan)
 app.include_router(admin_router)
 
 
@@ -29,8 +41,8 @@ async def current_context(x_api_key: str | None = Header(default=None)) -> Reque
 
 
 _context_dependency = Depends(current_context)
-_store = SQLiteStore()
 _pg_store: PostgresStore | None = PostgresStore() if settings.postgres_dsn else None
+_store = AsyncPostgresJobAdapter(_pg_store) if _pg_store else SQLiteStore()
 _jobs = JobManager(_store)
 _state_store = create_state_store(settings.redis_url)
 _rate_limiter = RateLimiter(
@@ -77,15 +89,10 @@ async def readyz() -> Response:
         sqlite_queue_depth.set(_store.queue_depth())
         sqlite_running_jobs.set(_store.running_depth())
         sqlite_dead_letter_jobs.set(_store.dead_letter_depth())
-        dependencies["sqlite"] = "ok"
-    except sqlite3.Error:
-        dependencies["sqlite"] = "failed"
-    if _pg_store:
-        try:
-            await _pg_store.depth("queued")
-            dependencies["postgres"] = "ok"
-        except (OSError, RuntimeError):
-            dependencies["postgres"] = "failed"
+        backend = "postgres" if settings.postgres_dsn else "sqlite"
+        dependencies[backend] = "ok"
+    except (sqlite3.Error, OSError, RuntimeError):
+        dependencies["postgres" if settings.postgres_dsn else "sqlite"] = "failed"
     if settings.redis_url:
         try:
             _state_store.get_json("readyz")
@@ -127,8 +134,6 @@ async def create_run(
     request: RunRequest,
     context: RequestContext = _context_dependency,
 ) -> RunResponse:
-    from person_agents.graph.engine import run_graph
-
     session_id = request.session_id or context.session_id
     scoped_context = RequestContext(user_id=context.user_id, tenant_id=context.tenant_id, session_id=session_id)
     try:
@@ -138,8 +143,8 @@ async def create_run(
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     try:
         result = await asyncio.wait_for(
-            run_graph(request.prompt, session_id=session_id, context=scoped_context),
-            timeout=120,
+            _run_graph(request.prompt, session_id=session_id, context=scoped_context, services=getattr(app.state, "graph_services", None)),
+            timeout=settings.run_timeout_s,
         )
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail="Agent run timed out") from exc
@@ -177,16 +182,18 @@ async def create_async_run(
     finally:
         if slot_id:
             _rate_limiter.release_run_slot(slot_id, context.user_id, context.tenant_id)
-    run_id = _jobs.create(request.prompt, context.user_id, context.tenant_id, session_id, _jobs.default_provenance())
+    provenance = await _jobs.default_provenance()
+    if _pg_store:
+        run_id = str(uuid.uuid4())
+        await _pg_store.create_run(run_id, request.prompt, context.user_id, context.tenant_id, session_id, provenance=provenance)
+    else:
+        run_id = _jobs.create(request.prompt, context.user_id, context.tenant_id, session_id, provenance)
     return RunAcceptedResponse(run_id=run_id, status="queued", session_id=session_id)
 
 
 @app.get("/runs/{run_id}", response_model=RunResponse)
 async def get_run(run_id: str, context: RequestContext = _context_dependency) -> RunResponse:
-    if _pg_store:
-        run = await _pg_store.get_run(run_id, context.user_id, context.tenant_id)
-    else:
-        run = _jobs.get(run_id, context.user_id, context.tenant_id)
+    run = await _pg_store.get_run(run_id, context.user_id, context.tenant_id) if _pg_store else _jobs.get(run_id, context.user_id, context.tenant_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return RunResponse(
@@ -205,14 +212,14 @@ async def get_run(run_id: str, context: RequestContext = _context_dependency) ->
 
 @app.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str, context: RequestContext = _context_dependency) -> RunResponse:
-    if _pg_store:
-        run = await _pg_store.get_run(run_id, context.user_id, context.tenant_id)
-    else:
-        run = _jobs.get(run_id, context.user_id, context.tenant_id)
+    run = await _pg_store.get_run(run_id, context.user_id, context.tenant_id) if _pg_store else _jobs.get(run_id, context.user_id, context.tenant_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     if run["status"] not in ("queued", "running"):
         raise HTTPException(status_code=409, detail="Run is not cancelable")
     _state_store.set_json(f"cancel:{run_id}", True, ttl_seconds=3600)
-    _jobs.update(run_id, context.user_id, context.tenant_id, "canceled")
+    if _pg_store:
+        await _pg_store.update_run(run_id, context.user_id, context.tenant_id, "canceled")
+    else:
+        _jobs.update(run_id, context.user_id, context.tenant_id, "canceled")
     return RunResponse(session_id=run["session_id"], status="canceled")

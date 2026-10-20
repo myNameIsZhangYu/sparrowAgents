@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     tenant_daily_cost_limit: float = 10.0
     run_max_attempts: int = 3
     run_retry_backoff_seconds: int = 30
+    run_timeout_s: int = 120
+    llm_timeout_s: int = 30
+    vector_timeout_s: float = 5
     agent_version: str = "0.1.0"
     prompt_version: str = "default-v1"
     tool_config_version: str = "default-v1"
