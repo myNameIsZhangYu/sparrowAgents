@@ -19,3 +19,4 @@ class AgentState(TypedDict):
     owner_user_id: str
     current_agent: str
     agent_history: list[str]
+    started_at: float | None

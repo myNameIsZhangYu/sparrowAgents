@@ -26,7 +26,7 @@ def route_after_planner(state: AgentState) -> str:
     plan = state.get("plan", [])
     if plan and plan[state.get("current_step", 0)].get("tool", "none") != "none":
         return "tool_specialist"
-    return "executor"
+    return "execution_agent"
 
 
 def route_after_tool(state: AgentState) -> str:

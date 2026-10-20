@@ -26,6 +26,22 @@ from person_agents.middleware import governed_tool_call
 from person_agents.observability.metrics import agent_run_duration_seconds, agent_runs_total
 from person_agents.security.context import RequestContext
 
+GREETING_REPLIES = {
+    "hello": "Hello! How can I help you today?",
+    "hi": "Hi! How can I help you today?",
+    "hey": "Hey! How can I help you today?",
+}
+
+
+def _fast_reply(user_input: str) -> str | None:
+    normalized = user_input.strip().lower().rstrip("!?., ")
+    if normalized in GREETING_REPLIES:
+        return GREETING_REPLIES[normalized]
+    for greeting in GREETING_REPLIES:
+        if normalized == greeting or normalized.startswith(greeting + " "):
+            return GREETING_REPLIES["hello"]
+    return None
+
 
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
     started = time.monotonic()
@@ -114,7 +130,7 @@ def build_graph(checkpointer: AsyncSqliteSaver | None = None, services: Any | No
     builder.add_conditional_edges(
         "planner",
         route_after_planner,
-        {"tool_specialist": "tool_specialist"},
+        {"tool_specialist": "tool_specialist", "execution_agent": "executor"},
     )
     builder.add_conditional_edges(
         "tool_specialist",
@@ -170,7 +186,6 @@ async def run_graph(
     services: Any | None = None,
 ) -> AgentState:
     context = context or RequestContext(user_id=session_id, tenant_id="default", session_id=session_id)
-    graph = build_graph(services=services)
     initial_state: AgentState = {
         "messages": [{"role": "user", "content": user_input}],
         "intent": "",
@@ -188,7 +203,21 @@ async def run_graph(
         "owner_user_id": context.user_id,
         "current_agent": "",
         "agent_history": [],
+        "started_at": time.monotonic(),
     }
+
+    reply = _fast_reply(user_input)
+    if reply is not None:
+        return {
+            **initial_state,
+            "intent": "chat",
+            "current_agent": "supervisor",
+            "tool_results": [{"step": 0, "action": "greeting", "tool": "none", "output": reply}],
+            "status": "completed",
+            "degraded": False,
+        }
+
+    graph = build_graph(services=services)
     config = {"configurable": {"thread_id": session_id}}
     result = await graph.ainvoke(initial_state, config)
     return result

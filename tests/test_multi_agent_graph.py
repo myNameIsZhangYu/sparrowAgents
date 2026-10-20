@@ -410,6 +410,62 @@ async def test_run_graph_accepts_services_and_preserves_api_contract(monkeypatch
     assert result["current_agent"] == "executor"
 
 
+async def test_planner_routes_plain_actions_to_execution_agent():
+    from person_agents.graph.edges import route_after_planner
+
+    assert route_after_planner({"plan": [{"tool": "none"}], "current_step": 0}) == "execution_agent"
+    assert route_after_planner({"plan": [{"tool": "filesystem"}], "current_step": 0}) == "tool_specialist"
+
+
+async def test_fast_reply_short_circuits_greeting(monkeypatch):
+    from person_agents.graph import engine
+    from person_agents.graph.engine import run_graph
+
+    def fail_build(*args, **kwargs):
+        raise AssertionError("greeting must not build the graph")
+
+    monkeypatch.setattr(engine, "build_graph", fail_build)
+
+    result = await run_graph(
+        "Hi there",
+        session_id="fast",
+        services=GraphServices(store=object(), vector=object(), registry=object()),
+    )
+
+    assert result["intent"] == "chat"
+    assert result["status"] == "completed"
+    assert result["tool_results"][-1]["output"] == "Hello! How can I help you today?"
+
+
+async def test_loop_guard_stops_after_elapsed_threshold(monkeypatch):
+    from person_agents.graph.engine import route_after_critic
+    from person_agents.graph.nodes import critic_node
+
+    async def governed_llm_call(*args, **kwargs):
+        class Response:
+            content = "retry"
+
+        return Response()
+
+    monkeypatch.setattr("person_agents.graph.nodes.governed_llm_call", governed_llm_call)
+    state = {
+        "messages": [],
+        "tool_results": [{"output": "partial"}],
+        "started_at": 0.0,
+        "retry_count": 1,
+        "session_id": "loop",
+        "tenant_id": "tenant",
+        "owner_user_id": "user",
+    }
+
+    result = await critic_node(state)
+
+    assert result["status"] == "failed"
+    assert result["degraded"] is True
+    assert result["error"] == "Long-running agent loop stopped"
+    assert route_after_critic({**state, **result}) == "memory_write"
+
+
 async def test_worker_uses_injected_services_for_graph(monkeypatch):
     from person_agents.memory.postgres_store import PostgresStore
     from person_agents.runtime.worker import run_one

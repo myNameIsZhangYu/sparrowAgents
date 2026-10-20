@@ -12,7 +12,11 @@ from person_agents.memory.sqlite_store import SQLiteStore
 from person_agents.memory.vector_store import VectorStore
 from person_agents.middleware import governed_llm_call, governed_tool_call
 from person_agents.observability.langfuse import trace_graph_node
-from person_agents.observability.metrics import agent_run_duration_seconds, agent_runs_total
+from person_agents.observability.metrics import (
+    agent_loop_breaks_total,
+    agent_run_duration_seconds,
+    agent_runs_total,
+)
 from person_agents.security.context import RequestContext
 from person_agents.tools.registry import ToolRegistry, register_default_tools
 
@@ -186,6 +190,18 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
 
 async def critic_node(state: AgentState) -> dict[str, Any]:
     started = time.monotonic()
+    started_at = state.get("started_at")
+    if (
+        started_at is not None
+        and time.monotonic() - float(started_at) >= settings.loop_guard_seconds
+    ):
+        agent_loop_breaks_total.labels("time_limit").inc()
+        return {
+            "critic_feedback": "fail",
+            "status": "failed",
+            "degraded": True,
+            "error": "Long-running agent loop stopped",
+        }
     graph_context = RequestContext(
         user_id=state.get("owner_user_id", state.get("session_id", "local")),
         tenant_id=state.get("tenant_id", "default"),

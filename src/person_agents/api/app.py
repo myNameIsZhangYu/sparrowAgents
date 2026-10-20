@@ -13,6 +13,7 @@ from person_agents.config.settings import settings
 from person_agents.governance.rate_limiter import QuotaExceededError, RateLimiter
 from person_agents.graph.engine import run_graph as _run_graph
 from person_agents.graph.runtime import GraphServices
+from person_agents.llm.fallback import LLMFallbackError
 from person_agents.memory.postgres_store import PostgresStore
 from person_agents.memory.sqlite_store import SQLiteStore
 from person_agents.middleware import _confirmations
@@ -148,6 +149,8 @@ async def create_run(
         )
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail="Agent run timed out") from exc
+    except LLMFallbackError as exc:
+        raise HTTPException(status_code=503, detail="LLM providers unavailable") from exc
     finally:
         _rate_limiter.release_run_slot(slot_id, context.user_id, context.tenant_id)
 

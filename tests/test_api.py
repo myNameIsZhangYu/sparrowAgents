@@ -35,6 +35,23 @@ async def test_run_requires_key(monkeypatch) -> None:
         assert response.status_code == 401
 
 
+async def test_run_returns_service_unavailable_for_llm_outage(monkeypatch) -> None:
+    from person_agents.llm.fallback import LLMFallbackError
+
+    async def unavailable_run(*args, **kwargs):
+        raise LLMFallbackError("All models in fallback chain failed: Connection error.")
+
+    monkeypatch.setattr("person_agents.api.app._run_graph", unavailable_run)
+    async with await api_client(monkeypatch) as api:
+        response = await api.post(
+            "/runs",
+            json={"prompt": "hello"},
+            headers={"X-API-Key": "test-key"},
+        )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "LLM providers unavailable"}
+
+
 async def test_confirmation_endpoints(monkeypatch) -> None:
     async with await api_client(monkeypatch) as api:
         digest = hashlib.sha256(b"test-key").hexdigest()

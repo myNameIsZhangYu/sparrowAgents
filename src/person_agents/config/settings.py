@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     run_max_attempts: int = 3
     run_retry_backoff_seconds: int = 30
     run_timeout_s: int = 120
+    loop_guard_seconds: float = 15.0
     llm_timeout_s: int = 30
     vector_timeout_s: float = 5
     agent_version: str = "0.1.0"

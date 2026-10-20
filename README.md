@@ -337,3 +337,19 @@ docker compose --env-file .env.compose --profile default up -d
 If the OpenAI-compatible endpoint, Ollama, or other service runs on the host, rewrite `127.0.0.1` and
 `localhost` to the WSL gateway address in `.env.compose`; `host.docker.internal` may need
 `extra_hosts: ["host.docker.internal:host-gateway"]` depending on Docker Desktop/WSL2 networking.
+
+### Local LLM proxy relay
+
+When the OpenAI-compatible proxy binds only to `127.0.0.1`, the app container cannot use
+`host.docker.internal` directly. Compose includes a persistent host-network relay for this case:
+
+```env
+LLM_RELAY_PORT=18788
+LLM_RELAY_TARGET=127.0.0.1
+LLM_RELAY_TARGET_PORT=8788
+OPENAI_BASE_URL=http://host.docker.internal:18788/v1
+```
+
+The relay is part of the `default` profile and uses `restart: unless-stopped`. It forwards
+container traffic from the host port `LLM_RELAY_PORT` to the host-only proxy on
+`LLM_RELAY_TARGET:LLM_RELAY_TARGET_PORT`.

@@ -49,3 +49,9 @@ llm_calls_total = Counter(
 sqlite_queue_depth = Gauge("sqlite_queue_depth", "Queued SQLite jobs", registry=registry)
 sqlite_running_jobs = Gauge("sqlite_running_jobs", "Running SQLite jobs", registry=registry)
 sqlite_dead_letter_jobs = Gauge("sqlite_dead_letter_jobs", "Dead-letter SQLite jobs", registry=registry)
+agent_loop_breaks_total = Counter(
+    "agent_loop_breaks_total",
+    "Agent loops stopped by the long-running guard",
+    ["reason"],
+    registry=registry,
+)

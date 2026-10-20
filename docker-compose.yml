@@ -1,4 +1,17 @@
 services:
+  llm-relay:
+    profiles: ["default"]
+    image: alpine:3.18
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["apk add --no-cache socat >/dev/null && exec socat TCP-LISTEN:${LLM_RELAY_PORT:-18788},fork,reuseaddr,bind=0.0.0.0 TCP:${LLM_RELAY_TARGET:-127.0.0.1}:${LLM_RELAY_TARGET_PORT:-8788}"]
+    network_mode: host
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 64M
+
   app:
     profiles: ["default"]
     build:
@@ -34,6 +47,9 @@ services:
         required: false
       redis:
         condition: service_healthy
+      llm-relay:
+        condition: service_started
+        required: false
 
   migrate:
     profiles: ["default", "postgres"]
