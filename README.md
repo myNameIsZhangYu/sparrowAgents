@@ -115,10 +115,10 @@ uv sync --all-extras
 ### 2. 配置环境变量
 
 ```bash
-cp .env.example .env
+cp .env.example local/env/app.env
 ```
 
-编辑 `.env`：
+编辑 `local/env/app.env`：
 
 ```env
 OPENAI_API_KEY=your-key-here
@@ -150,7 +150,7 @@ docker compose up -d
 docker compose up -d --build app
 
 # 打开 http://localhost:3000 → 注册账号 → 创建项目 → 获取 API Key
-# 将 pk-lf-xxx / sk-lf-xxx 填入 .env 的 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
+# 将 pk-lf-xxx / sk-lf-xxx 填入 local/env/app.env 的 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
 ```
 
 ## 测试
@@ -327,15 +327,15 @@ If dependency downloads stall during image build, use the offline wheelhouse flo
 ```bash
 PERSON_AGENTS_API_KEY='your-api-key' \
 PERSON_AGENTS_ADMIN_API_KEY='your-admin-key' \
-./scripts/generate_compose_env.sh .env.compose
+./scripts/generate_compose_env.sh local/env/compose.env
 
-./scripts/prepare_wheelhouse.sh .wheelhouse
-docker compose --env-file .env.compose --profile default build app
-docker compose --env-file .env.compose --profile default up -d
+./scripts/prepare_wheelhouse.sh local/cache/wheelhouse
+docker compose --env-file local/env/compose.env --profile default build app
+docker compose --env-file local/env/compose.env --profile default up -d
 ```
 
 If the OpenAI-compatible endpoint, Ollama, or other service runs on the host, rewrite `127.0.0.1` and
-`localhost` to the WSL gateway address in `.env.compose`; `host.docker.internal` may need
+`localhost` to the WSL gateway address in `local/env/compose.env`; `host.docker.internal` may need
 `extra_hosts: ["host.docker.internal:host-gateway"]` depending on Docker Desktop/WSL2 networking.
 
 ### Local LLM proxy relay

@@ -2,7 +2,11 @@
 
 ## Startup
 
-1. Create `.env` with the required environment variables below.
+1. Create `local/env/app.env` with the required application variables below, then run `./services.sh start`
+   or `bash scripts/generate_compose_env.sh local/env/compose.env` to create the private Compose file.
+   `local/env/compose.env` is git-ignored and contains generated passwords, API key hashes, and
+   service credentials. To retrieve Grafana's password, run:
+   `grep '^GRAFANA_ADMIN_PASSWORD=' local/env/compose.env`.
 2. Run `scripts/verify_production_stack.sh`.
 3. Check `/healthz`, `/readyz`, and `/metrics`.
 
@@ -31,13 +35,13 @@
 
 ```bash
 set -a
-source .env.compose
+source local/env/compose.env
 set +a
 
 ./scripts/backup_postgres.sh /tmp/person-agents-backups
-docker compose --env-file .env.compose --profile postgres stop app worker
+docker compose --env-file local/env/compose.env --profile postgres stop app worker
 ./scripts/restore_postgres.sh /tmp/person-agents-backups/person_agents_TIMESTAMP.dump
-docker compose --env-file .env.compose --profile postgres up -d app worker
+docker compose --env-file local/env/compose.env --profile postgres up -d app worker
 curl -fsS http://localhost:8000/readyz
 ```
 

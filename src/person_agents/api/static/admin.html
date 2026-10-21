@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>personAgents · 管理控制台</title>
+  <style>
+    :root { color-scheme: dark; --bg:#070c18; --panel:rgba(15,22,42,.72); --panel-2:rgba(8,13,28,.82); --border:rgba(123,142,255,.16); --text:#e8edff; --muted:#8e9ab8; --cyan:#3ad1ff; --violet:#7a5cff; --green:#27d3a2; --red:#ff5f7a; font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif; }
+    * { box-sizing:border-box; margin:0; }
+    body { min-height:100vh; padding:24px; color:var(--text); background:var(--bg); background-image:radial-gradient(circle at 10% 10%,rgba(122,92,255,.18),transparent 30%),radial-gradient(circle at 90% 5%,rgba(58,209,255,.16),transparent 30%); }
+    header { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+    h1 { font-size:22px; } .tagline { color:var(--muted); font-size:13px; margin-top:3px; }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:22px; margin-bottom:20px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
+    input { width:100%; padding:12px 13px; border-radius:12px; border:1px solid var(--border); background:rgba(4,8,20,.55); color:var(--text); outline:none; }
+    input:focus { border-color:rgba(58,209,255,.5); }
+    button { border:0; border-radius:12px; padding:12px 18px; color:#fff; background:linear-gradient(135deg,var(--cyan),var(--violet)); cursor:pointer; font-weight:650; }
+    button.ghost { background:var(--panel-2); border:1px solid var(--border); color:var(--text); }
+    button.danger { background:#7a2438; box-shadow:none; }
+    .row { display:flex; gap:12px; align-items:end; flex-wrap:wrap; }
+    label { display:block; color:var(--muted); font-size:12px; margin-bottom:6px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th,td { text-align:left; padding:10px 8px; border-bottom:1px solid rgba(123,142,255,.1); }
+    th { color:var(--muted); font-weight:600; }
+    .active { color:var(--green); } .revoked { color:var(--red); }
+    .hint { color:var(--muted); font-size:12px; margin-top:10px; }
+    .error { color:var(--red); font-size:13px; margin-top:10px; }
+    .ok { color:var(--green); }
+  </style>
+</head>
+<body>
+  <header><div><h1>personAgents 管理控制台</h1><div class="tagline">Runtime configuration · Credentials · Governance</div></div><button onclick="location.href='/'">返回功能台</button></header>
+  <main>
+    <section class="card" id="login-card">
+      <h2>管理员登录</h2>
+      <div class="grid"><div><label>用户名</label><input id="username" value="admin"></div><div><label>密码</label><input id="password" type="password" placeholder="admin"></div><div><button onclick="login()">登录</button></div></div>
+      <div class="hint">默认账号：admin / admin。生产部署后请立即修改。</div><div class="error" id="login-error"></div>
+    </section>
+    <section id="dashboard" style="display:none">
+      <section class="card"><h2>LLM 运行时配置</h2>
+        <div class="grid"><div><label>Base URL</label><input id="base-url"></div><div><label>模型</label><input id="model"></div><div><label>LLM API Key</label><input id="llm-key" type="password"></div><div><button onclick="saveLLM()">保存配置</button></div></div>
+        <div class="hint" id="llm-status"></div>
+      </section>
+      <section class="card"><h2>用户 API Key 管理</h2>
+        <div class="grid"><div><label>租户 ID</label><input id="tenant-id" value="default"></div><div><label>用户 ID</label><input id="user-id"></div><div><button onclick="createKey()">创建 Key</button></div></div>
+        <div class="row" style="margin-top:12px"><input id="plaintext" readonly placeholder="新 Key 只显示一次"><button class="ghost" onclick="loadKeys()">刷新</button></div>
+        <table style="margin-top:14px"><thead><tr><th>Key ID</th><th>租户</th><th>用户</th><th>状态</th><th>操作</th></tr></thead><tbody id="keys"></tbody></table>
+      </section>
+    </section>
+  </main>
+  <script>
+    let token = sessionStorage.getItem('admin-token') || '';
+    const byId = id => document.getElementById(id);
+    const loginCard = byId('login-card'), dashboard = byId('dashboard');
+    const username = byId('username'), password = byId('password'), loginError = byId('login-error');
+    const baseUrl = byId('base-url'), model = byId('model'), llmKey = byId('llm-key'), llmStatus = byId('llm-status');
+    const tenantId = byId('tenant-id'), userId = byId('user-id'), plaintext = byId('plaintext');
+    function headers() { return { 'X-Admin-Session': token, 'Content-Type':'application/json' }; }
+    function show(element, on) { element.style.display = on ? 'block' : 'none'; }
+    async function login() {
+      const res = await fetch('/admin/session', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:username.value,password:password.value}) });
+      const data = await res.json();
+      if (!res.ok) { loginError.textContent = data.detail || '登录失败'; return; }
+      token = data.token; sessionStorage.setItem('admin-token', token); show(loginCard, false); show(dashboard, true); loadConfig(); loadKeys();
+    }
+    async function loadConfig() {
+      const res = await fetch('/admin/llm-config', { headers:headers() }); if (!res.ok) return logout();
+      const data = await res.json(); baseUrl.value = data.base_url || ''; model.value = data.model || '';
+      llmStatus.textContent = data.configured ? '当前配置版本：v' + data.version : '尚未配置运行时 LLM';
+      llmStatus.className = 'hint';
+    }
+    async function saveLLM() {
+      const apiKey = llmKey.value.trim();
+      if (!apiKey) { llmStatus.textContent = 'LLM API Key 不能为空'; llmStatus.className = 'hint error'; return; }
+      const res = await fetch('/admin/llm-config', { method:'POST', headers:headers(), body:JSON.stringify({base_url:baseUrl.value.trim(),model:model.value.trim(),api_key:apiKey}) });
+      const data = await res.json(); llmStatus.textContent = res.ok ? '已保存配置版本：v' + data.version : (data.detail || '保存失败'); llmStatus.className = res.ok ? 'hint ok' : 'hint error';
+    }
+    async function createKey() {
+      const res = await fetch('/admin/console/credentials', { method:'POST', headers:headers(), body:JSON.stringify({tenant_id:tenantId.value,user_id:userId.value}) });
+      const data = await res.json(); if (!res.ok) return alert(data.detail || '创建失败');
+      plaintext.value = data.plaintext; userId.value = ''; loadKeys();
+    }
+    async function loadKeys() {
+      const res = await fetch('/admin/console/credentials', { headers:headers() }); if (!res.ok) return logout();
+      const rows = await res.json(); byId('keys').innerHTML = rows.map(r => `<tr><td>${r.key_id}</td><td>${r.tenant_id}</td><td>${r.user_id}</td><td class="${r.status}">${r.status}</td>
+        <td><button class="ghost" onclick="rotateKey('${r.key_id}')">轮换</button> <button class="danger" onclick="revokeKey('${r.key_id}')">撤销</button></td></tr>`).join('');
+    }
+    async function rotateKey(id) {
+      const res = await fetch(`/admin/console/credentials/${id}/rotate`, { method:'POST', headers:headers() }); const data = await res.json();
+      if (!res.ok) return alert(data.detail || '轮换失败'); plaintext.value = data.plaintext; loadKeys();
+    }
+    async function revokeKey(id) {
+      if (!confirm('确认撤销该 Key？')) return;
+      await fetch(`/admin/console/credentials/${id}/revoke`, { method:'POST', headers:headers() }); loadKeys();
+    }
+    function logout() { token=''; sessionStorage.removeItem('admin-token'); show(dashboard, false); show(loginCard, true); }
+    if (token) { show(loginCard, false); show(dashboard, true); loadConfig(); loadKeys(); }
+  </script>
+</body>
+</html>

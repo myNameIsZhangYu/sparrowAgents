@@ -37,4 +37,4 @@ docker build -t person-agents/sandbox:latest .
 ```
 
 ## Project Structure
-See `docs/superpowers/specs/2026-10-16-personal-agent-design.md` for architecture.
+Architecture plans are kept in the local working folder and are not part of the public repository.

@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>personAgents · 智能体控制台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070c18;
+      --panel: rgba(15, 22, 42, .72);
+      --panel-2: rgba(8, 13, 28, .82);
+      --border: rgba(123, 142, 255, .16);
+      --text: #e8edff;
+      --muted: #8e9ab8;
+      --cyan: #3ad1ff;
+      --violet: #7a5cff;
+      --green: #27d3a2;
+      --red: #ff5f7a;
+      --amber: #ffb648;
+      --radius: 18px;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body {
+      min-height: 100vh; background: var(--bg); color: var(--text);
+      background-image:
+        radial-gradient(circle at 12% 8%, rgba(58,209,255,.18), transparent 28%),
+        radial-gradient(circle at 88% 4%, rgba(122,92,255,.2), transparent 30%),
+        radial-gradient(circle at 50% 100%, rgba(39,211,162,.08), transparent 35%);
+      display: grid; grid-template-rows: auto 1fr; padding: 24px;
+    }
+    header { display:flex; justify-content:space-between; align-items:center; margin-bottom:22px; }
+    .brand { display:flex; align-items:center; gap:16px; }
+    .logo {
+      width:46px;height:46px;border-radius:16px;display:grid;place-items:center;
+      background: conic-gradient(from 220deg, var(--cyan), var(--violet), var(--green), var(--cyan));
+      box-shadow:0 0 25px rgba(122,92,255,.4); font-weight:800;
+    }
+    h1 { font-size:23px; letter-spacing:.4px; }
+    .tagline { color:var(--muted); font-size:13px; margin-top:3px; }
+    .pill { padding:8px 14px; border-radius:999px; background:var(--panel); border:1px solid var(--border); color:var(--muted); font-size:13px; }
+    .pill b { color:var(--text); }
+    .layout { display:grid; grid-template-columns: minmax(0,1fr) 340px; gap:22px; align-items:start; }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); box-shadow:0 20px 55px rgba(0,0,0,.25); }
+    .chat { min-height:590px; display:flex; flex-direction:column; overflow:hidden; backdrop-filter:blur(18px); }
+    .messages { flex:1; overflow:auto; padding:24px; display:flex; flex-direction:column; gap:18px; }
+    .msg { max-width:78%; padding:14px 17px; border-radius:16px; line-height:1.65; white-space:pre-wrap; }
+    .user { align-self:flex-end; background:linear-gradient(135deg,#3848ff,#7a5cff); box-shadow:0 10px 24px rgba(56,72,255,.22); }
+    .agent { align-self:flex-start; background:var(--panel-2); border:1px solid var(--border); }
+    .system { align-self:center; color:var(--muted); font-size:12px; }
+    .meta { font-size:11px; color:var(--muted); margin-top:7px; }
+    .composer { border-top:1px solid var(--border); padding:16px; background:var(--panel-2); }
+    textarea {
+      width:100%; min-height:118px; resize:vertical; border-radius:14px; border:1px solid var(--border);
+      background:rgba(4,8,20,.55); color:var(--text); padding:15px; outline:none; font:inherit; line-height:1.6;
+    }
+    textarea:focus { border-color:rgba(58,209,255,.55); box-shadow:0 0 0 4px rgba(58,209,255,.08); }
+    .actions { display:flex; align-items:center; gap:12px; margin-top:14px; flex-wrap:wrap; }
+    .key { flex:1; min-width:240px; padding:11px 13px; border-radius:12px; border:1px solid var(--border); background:rgba(4,8,20,.55); color:var(--text); }
+    button {
+      border:0; cursor:pointer; padding:12px 22px; border-radius:12px; color:white; font-weight:650;
+      background:linear-gradient(135deg,var(--cyan),var(--violet)); box-shadow:0 12px 28px rgba(58,209,255,.18);
+    }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    button.ghost { background:var(--panel); border:1px solid var(--border); box-shadow:none; color:var(--text); }
+    .side { display:grid; gap:18px; }
+    .panel { padding:20px; }
+    .panel h2 { font-size:15px; margin-bottom:16px; }
+    .metric { display:flex; justify-content:space-between; gap:12px; padding:11px 0; border-bottom:1px solid rgba(123,142,255,.08); color:var(--muted); font-size:13px; }
+    .metric:last-child { border:0; }
+    .value { color:var(--text); font-weight:600; text-align:right; }
+    .ok { color:var(--green); } .bad { color:var(--red); } .warn { color:var(--amber); }
+    .job { border:1px solid var(--border); border-radius:13px; padding:12px; margin-bottom:10px; background:rgba(4,8,20,.35); font-size:13px; }
+    .row { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .id { font-family:ui-monospace,SFMono-Regular,monospace; font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; }
+    .status { font-weight:700; }
+    .queued, .running { color:var(--amber); } .completed { color:var(--green); } .failed, .canceled, .dead_letter { color:var(--red); }
+    .empty { color:var(--muted); text-align:center; padding:16px; }
+    footer { color:var(--muted); text-align:center; margin-top:18px; font-size:12px; }
+    @media (max-width: 950px) { .layout { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">AI</div>
+      <div><h1>personAgents 智能体控制台</h1><div class="tagline">Governed multi-agent runtime · Production Console</div></div>
+    </div>
+    <div style="display:flex;gap:10px"><input class="key" id="admin-key" type="password" placeholder="Admin Key"><button id="save-config" class="ghost">保存配置</button></div>
+    <div class="pill" id="global-status">正在检查系统状态…</div>
+  </header>
+  <main class="layout">
+    <section class="card chat">
+      <div class="messages" id="messages"></div>
+      <div class="composer">
+        <textarea id="prompt" placeholder="输入任务，例如：帮我总结今天的重点 / 查询项目状态 / 执行一次评估"></textarea>
+        <div class="actions">
+          <input class="key" id="api-key" type="password" placeholder="X-API-Key">
+          <button id="send">发送</button>
+          <button id="async" class="ghost">异步执行</button>
+          <button id="clear" class="ghost">清空</button>
+        </div>
+      </div>
+    </section>
+    <aside class="side">
+      <section class="card panel">
+        <h2>运行状态</h2>
+        <div class="metric"><span>API</span><span class="value" id="api-status">—</span></div>
+        <div class="metric"><span>任务库</span><span class="value" id="store-status">—</span></div>
+        <div class="metric"><span>Redis</span><span class="value" id="redis-status">—</span></div>
+        <div class="metric"><span>队列深度</span><span class="value" id="queue-depth">—</span></div>
+        <div class="metric"><span>执行中任务</span><span class="value" id="running-jobs">—</span></div>
+        <div class="metric"><span>死信任务</span><span class="value" id="dead-jobs">—</span></div>
+        <div class="metric"><span>Agent 调用</span><span class="value" id="agent-runs">—</span></div>
+        <div class="metric"><span>LLM 配置版本</span><span class="value" id="llm-version">—</span></div>
+      </section>
+      <section class="card panel">
+        <h2>异步任务</h2>
+        <div id="jobs"><div class="empty">暂无任务</div></div>
+      </section>
+    </aside>
+  </main>
+  <footer>personAgents Console · 本地连接不会存储 API Key</footer>
+  <script>
+    const key = document.getElementById('api-key');
+    const jobs = new Map();
+
+    function auth() { return { 'X-API-Key': key.value.trim(), 'Content-Type': 'application/json' }; }
+    function text(id, value, cls='') { document.getElementById(id).textContent = value; document.getElementById(id).className = 'value ' + cls; }
+    function message(content, type, meta='') {
+      const box = document.getElementById('messages');
+      const item = document.createElement('div');
+      item.className = 'msg ' + type;
+      item.textContent = content;
+      if (meta) { const m = document.createElement('div'); m.className = 'meta'; m.textContent = meta; item.appendChild(m); }
+      box.appendChild(item); box.scrollTop = box.scrollHeight;
+      return item;
+    }
+
+    async function health() {
+      try {
+        const res = await fetch('/healthz'); const data = await res.json();
+        text('api-status', data.status === 'ok' ? '正常' : '异常', data.status === 'ok' ? 'ok' : 'bad');
+        const ready = await fetch('/readyz'); const metrics = await ready.text();
+        const dep = metrics.match(/readyz_dependencies{([^}]+)}/)?.[1] || '';
+        const parsed = {};
+        dep.split(',').forEach(item => {
+          const [name, value] = item.trim().replace(/['"]/g, '').split(':');
+          if (name && value) parsed[name.trim()] = value.trim();
+        });
+        const storeName = parsed.postgres ? 'PostgreSQL' : 'SQLite';
+        const storeStatus = parsed.postgres || parsed.sqlite;
+        text('store-status', storeStatus ? storeName : '未配置', storeStatus === 'ok' ? 'ok' : (storeStatus ? 'bad' : ''));
+        text('redis-status', parsed.redis || '未配置', parsed.redis === 'ok' ? 'ok' : (parsed.redis ? 'bad' : ''));
+        const m = async () => (await (await fetch('/metrics')).text());
+        const raw = await m();
+        const gauge = name => Number(raw.match(new RegExp(name + '\\\\s+([0-9.e+-]+)'))?.[1] || 0);
+        text('queue-depth', gauge('sqlite_queue_depth'));
+        text('running-jobs', gauge('sqlite_running_jobs'));
+        text('dead-jobs', gauge('sqlite_dead_letter_jobs'));
+        text('agent-runs', gauge('agent_runs_total'));
+        document.getElementById('global-status').innerHTML = '系统状态 <b>在线</b>';
+      } catch {
+        text('api-status', '离线', 'bad');
+        document.getElementById('global-status').innerHTML = '系统状态 <b class="bad">离线</b>';
+      }
+    }
+
+    function renderJobs() {
+      const box = document.getElementById('jobs');
+      if (!jobs.size) { box.innerHTML = '<div class="empty">暂无任务</div>'; return; }
+      box.innerHTML = '';
+      for (const job of jobs.values()) {
+        const node = document.createElement('div'); node.className = 'job';
+        node.innerHTML = `<div class="row"><span class="status ${job.status}">${job.status}</span><span>${job.run_id.slice(0,10)}…</span></div>
+          <div class="id">${job.run_id}</div>`;
+        if (['queued','running'].includes(job.status)) {
+          const cancel = document.createElement('button'); cancel.className='ghost'; cancel.textContent='取消';
+          cancel.onclick = async () => {
+            await fetch(`/runs/${job.run_id}/cancel`, { method:'POST', headers:auth() }); loadJob(job.run_id);
+          };
+          node.querySelector('.row').appendChild(cancel);
+        }
+        box.appendChild(node);
+      }
+    }
+
+    async function loadJob(runId) {
+      try {
+        const res = await fetch(`/runs/${runId}`, { headers:auth() });
+        if (!res.ok) return; const data = await res.json(); jobs.set(runId, data); renderJobs();
+      } catch {}
+    }
+
+    function check(result, content, type='agent') {
+      if (result.confirmation_token) message('该操作需要人工确认：' + result.confirmation_token, 'system');
+      else message(content || result.output || '任务完成，但未返回输出。', type, '状态：' + result.status);
+    }
+
+    async function submit(asyncRun) {
+      const prompt = document.getElementById('prompt').value.trim();
+      if (!prompt) return;
+      if (!key.value.trim()) { message('请输入 X-API-Key。', 'system'); return; }
+      const btn = asyncRun ? document.getElementById('async') : document.getElementById('send');
+      btn.disabled = true; message(prompt, 'user');
+      try {
+        if (asyncRun) {
+          const res = await fetch('/runs/async', { method:'POST', headers:auth(), body:JSON.stringify({ prompt }) });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || res.statusText);
+          jobs.set(data.run_id, data); renderJobs();
+          setTimeout(() => loadJob(data.run_id), 800);
+          message('已创建异步任务：' + data.run_id, 'system');
+        } else {
+          const res = await fetch('/runs', { method:'POST', headers:auth(), body:JSON.stringify({ prompt }) });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || res.statusText);
+          check(data);
+        }
+        document.getElementById('prompt').value = '';
+      } catch (error) { message('执行失败：' + error.message, 'system'); }
+      finally { btn.disabled = false; health(); }
+    }
+
+    document.getElementById('send').onclick = () => submit(false);
+    document.getElementById('async').onclick = () => submit(true);
+    document.getElementById('clear').onclick = () => document.getElementById('messages').innerHTML = '';
+    document.getElementById('prompt').onkeydown = event => { if (event.key === 'Enter' && event.ctrlKey) submit(false); };
+    document.getElementById('save-config').onclick = async () => {
+      const adminKey = document.getElementById('admin-key').value.trim();
+      if (!adminKey) return alert('请输入 Admin Key');
+      const baseUrl = prompt('LLM Base URL'); const model = prompt('模型名称'); const apiKey = prompt('LLM API Key');
+      const res = await fetch('/admin/llm-config', { method:'POST', headers:{'X-Admin-Key':adminKey,'Content-Type':'application/json'}, body:JSON.stringify({base_url:baseUrl,model,api_key:apiKey}) });
+      const data = await res.json(); alert(res.ok ? '配置已保存' : (data.detail || '保存失败'));
+      loadConfig();
+    };
+    async function loadConfig() {
+      const adminKey = document.getElementById('admin-key').value.trim();
+      if (!adminKey) return;
+      const res = await fetch('/admin/llm-config', { headers:{'X-Admin-Key':adminKey} });
+      if (!res.ok) return; const data = await res.json(); text('llm-version', data.configured ? `v${data.version}` : '未配置');
+    }
+    document.getElementById('admin-key').onchange = loadConfig;
+    health(); setInterval(health, 5000); setInterval(() => [...jobs.keys()].forEach(loadJob), 3000);
+  </script>
+</body>
+</html>

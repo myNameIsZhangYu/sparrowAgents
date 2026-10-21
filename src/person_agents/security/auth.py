@@ -21,11 +21,11 @@ def resolve_request_context(api_key: str | None) -> RequestContext:
         raise SecurityError("API key is required")
     try:
         # 优先查凭证库；存储故障时不泄露异常，只回退到静态 key。
-        credential = CredentialManager().verify(api_key)
+        credential = CredentialManager(settings.sqlite_path.parent / "credentials.db").verify(api_key)
     except (RuntimeError, sqlite3.Error):
         credential = None
     if credential:
-        role = "admin" if credential.role == "admin" else "user"
+        role = "user"
         return RequestContext(
             user_id=credential.user_id,
             tenant_id=credential.tenant_id,

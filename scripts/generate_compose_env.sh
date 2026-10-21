@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -f .env ]]; then
+if [[ -f "${APP_ENV_FILE:-local/env/app.env}" ]]; then
   set -a
   # shellcheck disable=SC1091
-  . ./.env
+  . "${APP_ENV_FILE:-local/env/app.env}"
   set +a
 fi
 
@@ -15,7 +15,7 @@ compose_openai_base_url="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 compose_openai_base_url="${compose_openai_base_url//127.0.0.1/host.docker.internal}"
 compose_openai_base_url="${compose_openai_base_url//localhost/host.docker.internal}"
 
-output="${1:-.env.compose}"
+output="${1:-local/env/compose.env}"
 umask 077
 cat >"$output" <<EOF
 OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -40,6 +40,7 @@ LANGFUSE_S3_ACCESS_KEY_ID=$(openssl rand -hex 16)
 LANGFUSE_S3_SECRET_ACCESS_KEY=$(openssl rand -hex 24)
 UV_INDEX_URL=${UV_INDEX_URL:-}
 UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT:-120}
+RUNTIME_SECRET=${RUNTIME_SECRET:-$(openssl rand -base64 32 | tr '+/' '-_')}
 HTTP_PROXY=${HTTP_PROXY:-}
 HTTPS_PROXY=${HTTPS_PROXY:-}
 NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}

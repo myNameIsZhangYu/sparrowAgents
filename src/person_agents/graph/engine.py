@@ -30,16 +30,20 @@ GREETING_REPLIES = {
     "hello": "Hello! How can I help you today?",
     "hi": "Hi! How can I help you today?",
     "hey": "Hey! How can I help you today?",
+    "你好": "你好！我可以协助你运行任务、操作工具或查询信息。",
+    "您好": "您好！我可以协助你运行任务、操作工具或查询信息。",
+    "hi there": "Hi! How can I help you today?",
+    "hello there": "Hello! How can I help you today?",
 }
 
 
 def _fast_reply(user_input: str) -> str | None:
     # 规范化常见标点和大小写，让打招呼命中快速回复。
-    normalized = user_input.strip().lower().rstrip("!?., ")
+    normalized = user_input.strip().lower().rstrip("!?.,，！？。 ")
     if normalized in GREETING_REPLIES:
         return GREETING_REPLIES[normalized]
     # 支持 “Hi there” 这类常见寒暄开头。
-    for greeting in GREETING_REPLIES:
+    for greeting in ("hello", "hi", "hey"):
         if normalized == greeting or normalized.startswith(greeting + " "):
             return GREETING_REPLIES["hello"]
     return None

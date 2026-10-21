@@ -1,11 +1,12 @@
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # pydantic-settings 从环境变量和 .env 读取；类型校验在实例化时执行。
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # pydantic-settings 从环境变量和 local/env/app.env 读取；类型校验在实例化时执行。
+    model_config = SettingsConfigDict(env_file="local/env/app.env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "person-agents"
     debug: bool = False
@@ -20,9 +21,18 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "console"
 
-    data_dir: Path = Path.home() / ".person-agents"
-    sqlite_path: Path = Path.home() / ".person-agents" / "memory.db"
-    chroma_path: Path = Path.home() / ".person-agents" / "chroma"
+    data_dir: Path = Field(
+        default=Path.home() / ".person-agents",
+        validation_alias=AliasChoices("PERSON_AGENTS_DATA_DIR", "DATA_DIR"),
+    )
+    sqlite_path: Path = Field(
+        default=Path.home() / ".person-agents" / "memory.db",
+        validation_alias=AliasChoices("PERSON_AGENTS_SQLITE_PATH", "SQLITE_PATH"),
+    )
+    chroma_path: Path = Field(
+        default=Path.home() / ".person-agents" / "chroma",
+        validation_alias=AliasChoices("PERSON_AGENTS_CHROMA_PATH", "CHROMA_PATH"),
+    )
 
     langfuse_host: str = "http://localhost:3000"
     langfuse_public_key: str = ""
@@ -59,6 +69,8 @@ class Settings(BaseSettings):
     encryption_key: str = ""
     # 审计保留天数由部署方按合规要求配置。
     audit_retention_days: int = 90
+    # 运行时 LLM 覆盖配置的加密密钥；生产必须设置高熵密钥。
+    runtime_secret: str = ""
 
 
 settings = Settings()

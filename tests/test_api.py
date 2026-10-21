@@ -29,6 +29,13 @@ async def test_healthz(monkeypatch) -> None:
         assert response.json() == {"status": "ok"}
 
 
+async def test_web_console(monkeypatch) -> None:
+    async with await api_client(monkeypatch) as api:
+        response = await api.get("/")
+        assert response.status_code == 200
+        assert "personAgents 智能体控制台" in response.text
+
+
 async def test_run_requires_key(monkeypatch) -> None:
     async with await api_client(monkeypatch) as api:
         response = await api.post("/runs", json={"prompt": "hello"})

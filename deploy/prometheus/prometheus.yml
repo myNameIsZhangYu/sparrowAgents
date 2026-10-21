@@ -6,6 +6,7 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["app:8000"]
+        # Compose 网络别名在 Prometheus 容器中可通过 app 解析。
 
 rule_files:
   - /etc/prometheus/alerts.yml

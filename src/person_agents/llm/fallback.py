@@ -38,12 +38,19 @@ def load_fallback_chain(path: Path | None = None) -> list[dict[str, Any]]:
 
 async def call_with_fallback(messages: list[dict[str, str]]) -> LLMResponse:
     from person_agents.config.settings import settings
+    from person_agents.runtime.llm_settings import latest_llm_settings
 
     chain = load_fallback_chain()
+    runtime = latest_llm_settings()
+    if runtime:
+        for entry in chain:
+            if entry.get("provider") == "openai":
+                entry["base_url"] = runtime.openai_base_url
+                entry["model"] = runtime.openai_model
     last_error: Exception | None = None
     for entry in chain:
         provider = entry.get("provider", "openai")
-        if provider != "ollama" and not settings.openai_api_key:
+        if provider != "ollama" and not (runtime or settings.openai_api_key):
             # 没有 API key 时跳过云/兼容 provider，避免必然失败。
             logger.info("skipping_provider_no_key", provider=provider)
             continue

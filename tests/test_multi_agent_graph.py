@@ -434,7 +434,26 @@ async def test_fast_reply_short_circuits_greeting(monkeypatch):
 
     assert result["intent"] == "chat"
     assert result["status"] == "completed"
-    assert result["tool_results"][-1]["output"] == "Hello! How can I help you today?"
+    assert result["tool_results"][-1]["output"] == "Hi! How can I help you today?"
+
+
+async def test_fast_reply_supports_chinese_greeting(monkeypatch):
+    from person_agents.graph import engine
+    from person_agents.graph.engine import run_graph
+
+    def fail_build(*args, **kwargs):
+        raise AssertionError("greeting must not build the graph")
+
+    monkeypatch.setattr(engine, "build_graph", fail_build)
+
+    result = await run_graph(
+        "你好！",
+        session_id="fast-zh",
+        services=GraphServices(store=object(), vector=object(), registry=object()),
+    )
+
+    assert result["status"] == "completed"
+    assert result["tool_results"][-1]["output"] == "你好！我可以协助你运行任务、操作工具或查询信息。"
 
 
 async def test_loop_guard_stops_after_elapsed_threshold(monkeypatch):

@@ -5,10 +5,12 @@ import uuid
 from contextlib import asynccontextmanager
 
 import redis
+import sqlalchemy.exc
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 
 from person_agents.api.admin import router as admin_router
 from person_agents.api.schemas import Provenance, RunAcceptedResponse, RunRequest, RunResponse
+from person_agents.api.web import router as web_router
 from person_agents.config.settings import settings
 from person_agents.governance.rate_limiter import QuotaExceededError, RateLimiter
 from person_agents.graph.engine import run_graph as _run_graph
@@ -33,6 +35,7 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="person-agents", version="0.1.0", lifespan=lifespan)
 app.include_router(admin_router)
+app.include_router(web_router)
 
 
 async def current_context(x_api_key: str | None = Header(default=None)) -> RequestContext:
@@ -91,14 +94,24 @@ async def readyz() -> Response:
     )
 
     dependencies: dict[str, str] = {}
+    queue_depth = 0
+    running_depth = 0
+    dead_letter_depth = 0
     try:
         # 刷新任务队列指标，同时确认任务后端当前可查询。
-        sqlite_queue_depth.set(_store.queue_depth())
-        sqlite_running_jobs.set(_store.running_depth())
-        sqlite_dead_letter_jobs.set(_store.dead_letter_depth())
+        from person_agents.runtime.job_store import AsyncPostgresJobAdapter
+
+        if isinstance(_store, AsyncPostgresJobAdapter):
+            queue_depth = await _store.store.depth("queued")
+            running_depth = await _store.store.depth("running")
+            dead_letter_depth = await _store.store.depth("dead_letter")
+        else:
+            queue_depth = _store.queue_depth()
+            running_depth = _store.running_depth()
+            dead_letter_depth = _store.dead_letter_depth()
         backend = "postgres" if settings.postgres_dsn else "sqlite"
         dependencies[backend] = "ok"
-    except (sqlite3.Error, OSError, RuntimeError):
+    except (sqlite3.Error, OSError, RuntimeError, sqlalchemy.exc.SQLAlchemyError):
         dependencies["postgres" if settings.postgres_dsn else "sqlite"] = "failed"
     if settings.redis_url:
         try:
@@ -108,6 +121,9 @@ async def readyz() -> Response:
         except redis.RedisError:
             dependencies["redis"] = "failed"
     healthy = all(status == "ok" for status in dependencies.values())
+    sqlite_queue_depth.set(queue_depth)
+    sqlite_running_jobs.set(running_depth)
+    sqlite_dead_letter_jobs.set(dead_letter_depth)
     body = generate_latest(registry) + f"\nreadyz_dependencies{dependencies}\n".encode()
     return Response(content=body, media_type=CONTENT_TYPE_LATEST, status_code=200 if healthy else 503)
 

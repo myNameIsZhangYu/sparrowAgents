@@ -1,9 +1,9 @@
 services:
   llm-relay:
     profiles: ["default"]
-    image: alpine:3.18
-    entrypoint: ["/bin/sh", "-c"]
-    command: ["apk add --no-cache socat >/dev/null && exec socat TCP-LISTEN:${LLM_RELAY_PORT:-18788},fork,reuseaddr,bind=0.0.0.0 TCP:${LLM_RELAY_TARGET:-127.0.0.1}:${LLM_RELAY_TARGET_PORT:-8788}"]
+    image: alpine/socat:latest
+    entrypoint: ["socat"]
+    command: ["TCP-LISTEN:${LLM_RELAY_PORT:-18788},fork,reuseaddr,bind=0.0.0.0", "TCP:${LLM_RELAY_TARGET:-127.0.0.1}:${LLM_RELAY_TARGET_PORT:-8788}"]
     network_mode: host
     restart: unless-stopped
     deploy:
@@ -21,7 +21,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env.compose
+      - local/env/compose.env
     environment:
       PERSON_AGENTS_DATA_DIR: /data
       PERSON_AGENTS_SQLITE_PATH: /data/memory.db
@@ -30,7 +30,9 @@ services:
       API_KEY_HASH: ${API_KEY_HASH:?set API_KEY_HASH}
       ADMIN_API_KEY_HASH: ${ADMIN_API_KEY_HASH:?set ADMIN_API_KEY_HASH}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      POSTGRES_DSN: ${POSTGRES_DSN:-}
+      POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-person_agents}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-person_agents}
+      RUNTIME_SECRET: ${RUNTIME_SECRET:?set RUNTIME_SECRET}
+      PERSON_AGENTS_TENANT_MAX_RUNNING_RUNS: ${PERSON_AGENTS_TENANT_MAX_RUNNING_RUNS:-10}
     volumes:
       - app_data:/data
     restart: unless-stopped
@@ -60,7 +62,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env.compose
+      - local/env/compose.env
     environment:
       POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-person_agents}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-person_agents}
     depends_on:
@@ -78,7 +80,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env.compose
+      - local/env/compose.env
     environment:
       PERSON_AGENTS_DATA_DIR: /data
       PERSON_AGENTS_SQLITE_PATH: /data/memory.db
@@ -87,7 +89,9 @@ services:
       API_KEY_HASH: ${API_KEY_HASH:?set API_KEY_HASH}
       ADMIN_API_KEY_HASH: ${ADMIN_API_KEY_HASH:?set ADMIN_API_KEY_HASH}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      POSTGRES_DSN: ${POSTGRES_DSN:-}
+      POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-person_agents}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-person_agents}
+      RUNTIME_SECRET: ${RUNTIME_SECRET:?set RUNTIME_SECRET}
+      PERSON_AGENTS_TENANT_MAX_RUNNING_RUNS: ${PERSON_AGENTS_TENANT_MAX_RUNNING_RUNS:-10}
     volumes:
       - app_data:/data
     restart: unless-stopped
@@ -134,7 +138,7 @@ services:
       retries: 5
 
   langfuse-clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
+    image: clickhouse/clickhouse-server:25.12
     profiles: ["observability"]
     cap_add:
       - SYS_NICE
@@ -146,7 +150,7 @@ services:
       CLICKHOUSE_LISTEN_HOST: "0.0.0.0"
     volumes:
       - langfuse_ch_data:/var/lib/clickhouse
-      - ./config/clickhouse/listen.xml:/etc/clickhouse-server/config.d/listen.xml:ro
+      - ./local/config/clickhouse/listen.xml:/etc/clickhouse-server/config.d/listen.xml:ro
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 5s
@@ -300,6 +304,12 @@ services:
       REDIS_HOST: langfuse-redis
       REDIS_PORT: "6379"
       LANGFUSE_MIGRATION_V4_WRITE_MODE: dual
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://langfuse:3000/api/public/health || wget --spider -q http://langfuse:3000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
 
 volumes:
   app_data:

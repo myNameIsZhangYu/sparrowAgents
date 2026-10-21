@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -f .env ]]; then
+if [[ -f "${APP_ENV_FILE:-local/env/app.env}" ]]; then
   set -a
   # shellcheck disable=SC1091
-  . ./.env
+  . "${APP_ENV_FILE:-local/env/app.env}"
   set +a
 fi
 
-output="${1:-.wheelhouse}"
+output="${1:-local/cache/wheelhouse}"
 mkdir -p "$output"
 rm -rf "$output"/*
 

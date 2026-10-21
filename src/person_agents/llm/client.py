@@ -17,8 +17,14 @@ class LLMResponse:
 
 
 async def call_openai(model: str, messages: list[dict[str, str]], timeout_s: int, base_url: str | None = None) -> LLMResponse:
+    from person_agents.runtime.llm_settings import decrypt_api_key, latest_llm_settings
+
+    runtime = latest_llm_settings()
+    api_key = decrypt_api_key(runtime) if runtime else settings.openai_api_key
+    base_url = runtime.openai_base_url if runtime else base_url or settings.openai_base_url
+    model = runtime.openai_model if runtime and model == settings.openai_model else model
     # 每次创建独立 client，避免跨 fallback provider 复用错误 base_url。
-    client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or settings.openai_base_url)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     # 连接超时单独收紧，尽快发现代理不可达。
     timeout = httpx.Timeout(timeout_s, connect=5.0)
     resp = await client.chat.completions.create(model=model, messages=messages, timeout=timeout)  # type: ignore[arg-type]
