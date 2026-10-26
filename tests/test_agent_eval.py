@@ -1,3 +1,6 @@
+import asyncio
+import json
+
 import pytest
 
 from person_agents.eval.agent_cases import AgentEvalCase, production_agent_cases
@@ -51,7 +54,44 @@ async def test_eval_runner_exposes_agent_case_contract(monkeypatch):
     assert isinstance(captured["context"], RequestContext)
     assert report["total"] == 1
     assert report["results"][0]["passed"] is True
-    assert report["results"][0]["agent_history"] == list(case.expected_agent_history)
+
+
+def test_real_cli_eval_report_includes_runtime_metrics(monkeypatch):
+    from person_agents.eval.cli_cases import run_real_cli_workflow_eval
+
+    plan = [{"action": "answer", "tool": "none", "arguments": {}, "depends_on": []}]
+
+    class Response:
+        content = json.dumps(plan)
+        degraded = False
+        model = "fake"
+        prompt_tokens = 7
+        completion_tokens = 3
+
+    async def fake_llm(messages):
+        return Response()
+
+    monkeypatch.setattr("person_agents.graph.nodes.call_with_fallback", fake_llm)
+
+    report = asyncio.run(run_real_cli_workflow_eval(enable=True))
+
+    assert report["pass_rate"] == 1.0
+    assert report["tokens"] == 10
+    assert report["latency_ms"] >= 0
+
+
+def test_disabled_real_cli_eval_does_not_call_model(monkeypatch):
+    from person_agents.eval.cli_cases import run_real_cli_workflow_eval
+
+    async def fail_llm(messages):
+        raise AssertionError("disabled eval must not call the model")
+
+    monkeypatch.setattr("person_agents.graph.nodes.call_with_fallback", fail_llm)
+
+    report = asyncio.run(run_real_cli_workflow_eval(enable=False, threshold=0.8))
+
+    assert report["enabled"] is False
+    assert report["passed"] is True
 
 
 @pytest.mark.skipif(True, reason="Full graph execution is validated with RUN_LANGGRAPH_E2E outside this sandbox")

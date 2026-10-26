@@ -74,6 +74,14 @@ CREATE TABLE IF NOT EXISTS agent_collaboration_events (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_collaboration_session
     ON agent_collaboration_events(session_id, correlation_id);
+CREATE TABLE IF NOT EXISTS session_summaries (
+    session_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (session_id, owner_user_id, tenant_id)
+);
 """
 
 MIGRATIONS = [
@@ -185,6 +193,25 @@ class SQLiteStore:
         conn = self.connect()
         conn.execute("UPDATE sessions SET ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), total_tokens=? WHERE session_id=?", (total_tokens, session_id))
         conn.commit()
+
+    def upsert_session_summary(self, session_id: str, summary: str, owner_user_id: str = "local", tenant_id: str = "default") -> None:
+        conn = self.connect()
+        conn.execute(
+            """INSERT INTO session_summaries (session_id, owner_user_id, tenant_id, summary)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(session_id, owner_user_id, tenant_id) DO UPDATE SET
+                summary=excluded.summary,
+                updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')""",
+            (session_id, owner_user_id, tenant_id, summary[:2000]),
+        )
+        conn.commit()
+
+    def get_session_summary(self, session_id: str, owner_user_id: str = "local", tenant_id: str = "default") -> str | None:
+        row = self.connect().execute(
+            "SELECT summary FROM session_summaries WHERE session_id=? AND owner_user_id=? AND tenant_id=?",
+            (session_id, owner_user_id, tenant_id),
+        ).fetchone()
+        return row[0] if row else None
 
     def create_run(
         self,

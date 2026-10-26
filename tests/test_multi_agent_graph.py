@@ -72,6 +72,8 @@ async def test_compiled_graph_contains_multi_agent_topology():
 async def test_build_graph_uses_injected_services_without_module_globals():
     import person_agents.graph.nodes as graph_nodes
     from person_agents.graph.engine import build_graph
+    graph_nodes._store = None
+    graph_nodes._vector = None
     graph_nodes._registry = None
 
     services = GraphServices(store=object(), vector=object(), registry=object())
@@ -785,6 +787,12 @@ async def test_api_run_uses_injected_services(monkeypatch):
         raising=False,
     )
     captured_services = {}
+
+    import person_agents.api.app as api_app
+
+    monkeypatch.setattr(api_app._rate_limiter, "check_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(api_app._rate_limiter, "allow_run", lambda *args, **kwargs: "slot")
+    monkeypatch.setattr(api_app._rate_limiter, "release_run_slot", lambda *args, **kwargs: None)
 
     async def fake_run_graph(prompt, session_id, context, services=None):
         captured_services["services"] = services

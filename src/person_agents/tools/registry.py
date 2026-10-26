@@ -61,13 +61,15 @@ def register_default_tools(registry: ToolRegistry, workspace_root: str = "/tmp/p
 
     registry.register(ToolDef(
         name="filesystem",
-        description="Read, write, list, or delete files in a sandboxed workspace directory",
+        description="read, write, list, delete, append, copy, move, mkdir, or search files in a sandboxed workspace directory",
         parameters={
             "type": "object",
             "properties": {
-                "operation": {"type": "string", "enum": ["read", "write", "list", "delete"]},
+                "operation": {"type": "string", "enum": ["read", "write", "list", "delete", "append", "copy", "move", "mkdir", "search"]},
                 "path": {"type": "string"},
                 "content": {"type": "string"},
+                "destination": {"type": "string"},
+                "pattern": {"type": "string"},
             },
             "required": ["operation", "path"],
         },

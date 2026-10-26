@@ -34,6 +34,10 @@ class Settings(BaseSettings):
         default=Path.home() / ".person-agents" / "audit.db",
         validation_alias=AliasChoices("PERSON_AGENTS_AUDIT_DB_PATH", "AUDIT_DB_PATH"),
     )
+    state_db_path: Path = Field(
+        default=Path.home() / ".person-agents" / "state.db",
+        validation_alias=AliasChoices("PERSON_AGENTS_STATE_DB_PATH", "STATE_DB_PATH"),
+    )
     chroma_path: Path = Field(
         default=Path.home() / ".person-agents" / "chroma",
         validation_alias=AliasChoices("PERSON_AGENTS_CHROMA_PATH", "CHROMA_PATH"),

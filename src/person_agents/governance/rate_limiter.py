@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import structlog
 
-from person_agents.runtime.state import StateStore, create_state_store
+from person_agents.runtime.state import InMemoryStateStore, StateStore
 
 logger = structlog.get_logger()
 
@@ -49,7 +49,8 @@ class RateLimiter:
         max_running_runs: int = 3,
         daily_run_limit: int = 1000,
     ):
-        self.state_store = state_store or create_state_store()
+        # 限流器默认进程内隔离；中间件可显式注入共享存储用于分布式部署。
+        self.state_store = state_store or InMemoryStateStore()
         self._llm_capacity = llm_capacity
         self._llm_refill_rate = llm_refill_rate
         self._tool_capacity = tool_capacity

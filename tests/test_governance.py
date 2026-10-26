@@ -93,3 +93,17 @@ class TestRateLimiter:
         assert tokens == 1000000
         with pytest.raises(RuntimeError, match="Daily token quota"):
             limiter.record_llm_usage(response, "user", "tenant")
+async def test_practical_filesystem_operations_are_governed(tmp_path, monkeypatch):
+    from person_agents.tools.registry import ToolRegistry, register_default_tools
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace_root=str(tmp_path))
+    definition = registry.get("filesystem")
+
+    assert definition.requires_confirm is True
+    assert set(definition.parameters["properties"]["operation"]["enum"]) >= {
+        "append", "copy", "move", "mkdir", "search"
+    }
+
+    result = await definition.handler({"operation": "copy", "path": "a.txt", "destination": "../escape"})
+    assert result["status"] == "error"

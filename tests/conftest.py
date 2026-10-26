@@ -11,6 +11,10 @@ def disable_runtime_integrations(monkeypatch):
 
     settings.testing = True
     settings.langfuse_enabled = False
+    from person_agents.observability import langfuse
+
+    langfuse._client = None
+    langfuse._tracing_disabled = True
     data_dir = Path("/tmp/person-agents-test-data").absolute()
     data_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(settings, "data_dir", data_dir)

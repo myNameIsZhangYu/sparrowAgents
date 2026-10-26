@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
@@ -169,4 +170,74 @@ def create_state_store(redis_url: str = "") -> StateStore:
         import redis
 
         return RedisStateStore(redis.Redis.from_url(redis_url, decode_responses=True))
-    return InMemoryStateStore()
+    from person_agents.config.settings import settings
+
+    return SQLiteStateStore(settings.state_db_path)
+
+
+class SQLiteStateStore:
+    """Durable local implementation of StateStore."""
+
+    def __init__(self, db_path: Any):
+        self.db_path = db_path
+        self._conn = sqlite3.connect(str(db_path))
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS state_json (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at REAL)"
+        )
+        self._conn.commit()
+
+    def _clean(self) -> None:
+        self._conn.execute("DELETE FROM state_json WHERE expires_at IS NOT NULL AND expires_at < ?", (time.time(),))
+        self._conn.commit()
+
+    def set_json(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
+        expires_at = time.time() + ttl_seconds if ttl_seconds else None
+        self._conn.execute(
+            "INSERT INTO state_json (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at",
+            (key, json.dumps(value), expires_at),
+        )
+        self._conn.commit()
+
+    def get_json(self, key: str) -> Any | None:
+        self._clean()
+        row = self._conn.execute("SELECT value, expires_at FROM state_json WHERE key=?", (key,)).fetchone()
+        if not row or (row[1] is not None and row[1] < time.time()):
+            return None
+        return json.loads(row[0])
+
+    def delete(self, key: str) -> None:
+        self._conn.execute("DELETE FROM state_json WHERE key=?", (key,))
+        self._conn.commit()
+
+    def acquire_bucket(self, key: str, capacity: int, refill_rate: float) -> bool:
+        state = self.get_json(f"bucket:{key}")
+        now = time.monotonic()
+        tokens = float(capacity) if state is None else float(state["tokens"])
+        last = now if state is None else float(state["last"])
+        tokens = min(float(capacity), tokens + (now - last) * refill_rate)
+        if tokens < 1:
+            self.set_json(f"bucket:{key}", {"tokens": tokens, "last": now})
+            return False
+        self.set_json(f"bucket:{key}", {"tokens": tokens - 1, "last": now})
+        return True
+
+    def store_confirmation(self, confirmation: Confirmation, ttl_seconds: int) -> Confirmation:
+        self.set_json(f"confirmation:{confirmation.token}", asdict(confirmation), ttl_seconds=max(1, ttl_seconds))
+        return confirmation
+
+    def get_confirmation(self, token: str) -> Confirmation | None:
+        value = self.get_json(f"confirmation:{token}")
+        if not value:
+            return None
+        confirmation = Confirmation(**value)
+        if confirmation.expires_at < time.time():
+            self.delete(f"confirmation:{token}")
+            return None
+        return confirmation
+
+    def consume_confirmation(self, token: str) -> Confirmation | None:
+        confirmation = self.get_confirmation(token)
+        if confirmation is None:
+            return None
+        self.delete(f"confirmation:{token}")
+        return confirmation

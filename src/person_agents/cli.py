@@ -23,6 +23,7 @@ console = Console()
 logger = structlog.get_logger()
 _cli_chat_session = f"cli-chat-{os.getpid()}"
 _cli_state = {"pending_confirmation": None, "workspace": None}
+EXIT_COMMAND = "/exit"
 
 
 def _signal_handler(sig: int, frame: object) -> None:
@@ -158,6 +159,26 @@ def eval_cli_workflow() -> None:
     shutdown_langfuse()
 
 
+@app.command("eval-real-cli")
+def eval_real_cli(
+    enable: bool = typer.Option(False, "--enable", help="Explicitly enable real-model evaluation."),
+    threshold: float = typer.Option(0.8, help="Fail when pass rate is below this threshold."),
+) -> None:
+    """Run the optional real-model CLI evaluation gate."""
+    setup_logging()
+
+    async def _eval():
+        from person_agents.eval.cli_cases import run_real_cli_workflow_eval
+
+        report = await run_real_cli_workflow_eval(enable=enable, threshold=threshold)
+        console.print(json.dumps(report, ensure_ascii=False, indent=2))
+        if not report["passed"]:
+            raise typer.Exit(code=2)
+
+    asyncio.run(_eval())
+    shutdown_langfuse()
+
+
 @app.command()
 def serve(
     host: str = typer.Option("0.0.0.0", help="Bind host"),
@@ -247,19 +268,38 @@ async def _run_agent_prompt(prompt: str, session_id: str, workspace: str = "") -
     return render_agent_result(result)
 
 
+async def run_agent_with_progress(
+    agent,
+    *,
+    on_progress,
+    message: str,
+    final_message: str,
+):
+    on_progress(message)
+    try:
+        return await agent()
+    finally:
+        on_progress(final_message)
+
+
 async def _complete_pending_tool(confirmation_token: str, session_id: str) -> str:
+    from person_agents.graph import tool_confirmation
     from person_agents.graph.runtime import GraphServices
-    from person_agents.graph.tool_confirmation import confirm_pending_tool
+
+    confirm_pending_tool = tool_confirmation.confirm_pending_tool
 
     services = GraphServices.default(workspace_root=_cli_state.get("workspace"))
-    result = await confirm_pending_tool(
-        confirmation_token,
-        context=RequestContext(user_id=session_id, tenant_id="default", session_id=session_id),
-        registry=services.registry,
-        services=services,
-        resume=True,
-        session_id=session_id,
-    )
+    try:
+        result = await confirm_pending_tool(
+            confirmation_token,
+            context=RequestContext(user_id=session_id, tenant_id="default", session_id=session_id),
+            registry=services.registry,
+            services=services,
+            resume=True,
+            session_id=session_id,
+        )
+    except (PermissionError, RuntimeError, ValueError, TimeoutError) as exc:
+        return f"确认失败：{exc}"
     if isinstance(result, dict) and result.get("status") == "confirmation_required":
         return f"仍需确认：/confirm {result.get('confirmation_token')}"
     if not isinstance(result, dict):
@@ -282,7 +322,9 @@ def chat(
     readline.parse_and_bind("bind ^H backward-delete-char")
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
-    console.print("[bold]person-agents chat[/bold] (Ctrl+C to exit)")
+    active_workspace = workspace or str(Path.cwd())
+    console.print(f"[bold]person-agents chat[/bold] [dim]workspace: {active_workspace}[/dim]")
+    console.print("[dim]输入 /exit 退出；文件写入需要 /confirm。[/dim]")
     tracker = CostTracker(session_id="chat-session")
 
     async def _chat() -> None:
@@ -292,6 +334,8 @@ def chat(
                 user_input = await asyncio.to_thread(console.input, "[bold blue]> [/bold blue]")
                 if not user_input.strip():
                     continue
+                if user_input.strip() == EXIT_COMMAND:
+                    break
                 if user_input.startswith("/confirm"):
                     token = user_input.removeprefix("/confirm").strip() or (_cli_state["pending_confirmation"] or "")
                     if not token:
@@ -307,12 +351,22 @@ def chat(
                             console.print("可执行：")
                             console.print(f"/confirm {_cli_state['pending_confirmation']}")
                     continue
-                final_output = await _run_agent_prompt(user_input, _cli_chat_session, workspace=workspace)
+                progress_events: list[str] = []
+
+                async def _agent(prompt=user_input):
+                    return await _run_agent_prompt(prompt, _cli_chat_session, workspace=workspace)
+
+                final_output = await run_agent_with_progress(
+                    _agent,
+                    on_progress=progress_events.append,
+                    message="正在处理任务…",
+                    final_message="任务处理完成",
+                )
                 if final_output:
                     console.print(final_output)
             except KeyboardInterrupt:
-                console.print(f"\n[dim]session: {tracker.total_calls} calls, {tracker.total_tokens} tokens[/dim]")
-                break
+                console.print("[yellow]本轮已取消，输入 /exit 退出，继续输入可开始新一轮。[/yellow]")
+                console.print(f"[dim]session: {tracker.total_calls} calls, {tracker.total_tokens} tokens[/dim]")
             except LLMFallbackError as exc:
                 console.print(f"[red]Error:[/red] {exc}")
 

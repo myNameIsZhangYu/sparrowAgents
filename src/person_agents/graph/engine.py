@@ -246,6 +246,13 @@ async def run_graph(
     services: Any | None = None,
 ) -> AgentState:
     context = context or RequestContext(user_id=session_id, tenant_id="default", session_id=session_id)
+    summary = ""
+    if services is not None and hasattr(services.store, "get_session_summary"):
+        summary = services.store.get_session_summary(
+            session_id,
+            owner_user_id=context.user_id,
+            tenant_id=context.tenant_id,
+        ) or ""
     # 先构造完整初始状态，快速回复和普通运行共享同一字段契约。
     initial_state: AgentState = {
         "messages": [{"role": "user", "content": user_input}],
@@ -270,6 +277,7 @@ async def run_graph(
         "subtasks": [],
         "pending_subtask_ids": [],
         "subtask_results": [],
+        "session_summary": summary,
     }
 
     # 打招呼等低风险请求直接返回，节省 LLM 成本和延迟。
@@ -312,4 +320,22 @@ async def run_graph(
     if result.get("messages") and result["messages"][-1].get("role") == "user":
         result["messages"][-1]["role"] = "assistant"
         result["messages"][-1]["content"] = str(result.get("tool_results", [{}])[-1].get("output", ""))
+
+    successful_outputs = [
+        output
+        for item in result.get("tool_results", [])
+        if (output := item.get("output")) is not None
+        and (not isinstance(output, dict) or output.get("status") == "ok")
+    ]
+    if result.get("status") in {"success", "completed"} and successful_outputs and services is not None and hasattr(services.store, "upsert_session_summary"):
+        evidence = "; ".join(
+            f"operation={output.get('operation')} path={output.get('path')}" if isinstance(output, dict) and output.get("path") else str(output)[:120]
+            for output in successful_outputs[-3:]
+        )
+        services.store.upsert_session_summary(
+            session_id,
+            f"{summary} {evidence}".strip()[:2000],
+            owner_user_id=context.user_id,
+            tenant_id=context.tenant_id,
+        )
     return result

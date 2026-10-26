@@ -44,6 +44,17 @@ def test_render_confirmation_includes_action_path_and_token():
     assert "/confirm token-1" in text
 
 
+def test_render_agent_result_does_not_expose_planner_json():
+    result = {
+        "tool_results": [{"output": '[{"action":"write file","tool":"filesystem"}]'}],
+    }
+
+    text = render_agent_result(result)
+
+    assert '"tool":"filesystem"' not in text
+    assert text.startswith("任务已完成。执行摘要：")
+
+
 def test_render_agent_result_renders_confirmation(tmp_path: Path):
     result = {
         "status": "confirmation_required",

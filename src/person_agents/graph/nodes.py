@@ -56,6 +56,24 @@ def looks_like_tool_task(text: str) -> bool:
     return any(phrase in normalized for phrase in TOOL_TASK_PHRASES)
 
 
+def build_planner_context(messages, tool_results, summary=""):
+    items = []
+    for message in messages[-5:]:
+        items.append(f"{message.get('role')}: {str(message.get('content', ''))[:150]}")
+    for result in tool_results[-5:]:
+        output = result.get("output", "")
+        if isinstance(output, dict):
+            path = output.get("path")
+            operation = output.get("operation")
+            text = f"operation={operation} path={path}" if path else json.dumps(output, ensure_ascii=False)
+        else:
+            text = str(output)
+        items.append(f"tool: {text[:150]}")
+    if summary:
+        items.append(f"summary: {str(summary)[:150]}")
+    return "\n".join(items)[-600:]
+
+
 def normalize_planner_plan(raw_plan: Any, user_input: str) -> list[dict[str, Any]]:
     if not isinstance(raw_plan, list) or not raw_plan:
         return [{"action": user_input, "tool": "none", "depends_on": []}]
@@ -174,18 +192,22 @@ async def intent_node(state: AgentState, vector: VectorStore | None = None) -> d
         session_id=state.get("session_id", "cli"),
     )
     resolved_vector = vector or _get_vector()
-    try:
-        # 向量查询是同步库，放到线程里并限时，防止阻塞事件循环。
-        memory_hits = resolved_vector.query(
-            user_input,
-            n_results=3,
-            owner_user_id=context.user_id,
-            tenant_id=context.tenant_id,
-        )
-    except (RuntimeError, TypeError, ValueError) as exc:
-        # 记忆检索失败不阻断主流程，仅退化为无上下文运行。
-        logger.warning("vector_query_failed", timeout_s=settings.vector_timeout_s, error=str(exc))
+    if settings.testing and vector is None:
+        # 测试/评估禁用外部集成，避免真实向量库模型下载阻塞事件循环。
         memory_hits = []
+    else:
+        try:
+            # 向量查询是同步库，放到线程里并限时，防止阻塞事件循环。
+            memory_hits = resolved_vector.query(
+                user_input,
+                n_results=3,
+                owner_user_id=context.user_id,
+                tenant_id=context.tenant_id,
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            # 记忆检索失败不阻断主流程，仅退化为无上下文运行。
+            logger.warning("vector_query_failed", timeout_s=settings.vector_timeout_s, error=str(exc))
+            memory_hits = []
     memory_text = "\n".join(f"- {m['text']}" for m in memory_hits if m.get("text"))
     if looks_like_tool_task(user_input):
         intent = "task"
@@ -231,6 +253,12 @@ async def planner_node(state: AgentState, registry: ToolRegistry | None = None, 
         {"role": "assistant", "content": _result_text(result)}
         for result in state.get("tool_results", [])
     ]
+    session_summary = state.get("session_summary", "")
+    planner_context = build_planner_context(
+        state.get("messages", []),
+        state.get("tool_results", []),
+        session_summary,
+    )
     resolved_registry = registry or (services.registry if services else None)
     tools = [
         {
@@ -250,6 +278,7 @@ async def planner_node(state: AgentState, registry: ToolRegistry | None = None, 
                 "with 'action', 'tool', optional 'arguments', and optional 'depends_on' fields. "
                 "Every non-first step must declare 'depends_on' unless it can safely run in parallel. "
                 "Use 'none' only for direct LLM actions. "
+                f"Session context: {planner_context}\n"
                 f"Available tools: {tools}"
             ),
         },

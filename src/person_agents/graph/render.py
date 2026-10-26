@@ -44,4 +44,7 @@ def render_agent_result(result: dict[str, Any]) -> str:
             return "任务完成。"
         return str(last_output)
 
-    return str(last_output)
+    output = str(last_output)
+    if output.lstrip().startswith(("[", "{")) and ('"action"' in output or '"tool"' in output):
+        return "任务已完成。执行摘要：请补充或确认下一步。"
+    return output

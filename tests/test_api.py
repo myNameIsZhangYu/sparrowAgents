@@ -48,6 +48,11 @@ async def test_run_returns_service_unavailable_for_llm_outage(monkeypatch) -> No
     async def unavailable_run(*args, **kwargs):
         raise LLMFallbackError("All models in fallback chain failed: Connection error.")
 
+    import person_agents.api.app as api_app
+
+    monkeypatch.setattr(api_app._rate_limiter, "check_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(api_app._rate_limiter, "allow_run", lambda *args, **kwargs: "slot")
+    monkeypatch.setattr(api_app._rate_limiter, "release_run_slot", lambda *args, **kwargs: None)
     monkeypatch.setattr("person_agents.api.app._run_graph", unavailable_run)
     async with await api_client(monkeypatch) as api:
         response = await api.post(
@@ -76,6 +81,11 @@ async def test_async_run_and_cancel(monkeypatch, tmp_path) -> None:
 
     _jobs.store = SQLiteStore(db_path=tmp_path / "cancel.db")
     _jobs.registry.store = _jobs.store
+    import person_agents.api.app as api_app
+
+    monkeypatch.setattr(api_app._rate_limiter, "check_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(api_app._rate_limiter, "allow_run", lambda *args, **kwargs: "slot")
+    monkeypatch.setattr(api_app._rate_limiter, "release_run_slot", lambda *args, **kwargs: None)
     async with await api_client(monkeypatch) as api:
         accepted = await api.post("/runs/async", json={"prompt": "hello"}, headers={"X-API-Key": "test-key"})
         assert accepted.status_code == 202

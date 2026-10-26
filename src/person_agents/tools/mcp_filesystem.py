@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -48,9 +49,40 @@ class MCPFilesystemTool:
                 if target.is_file():
                     target.unlink()
                 elif target.is_dir():
-                    import shutil
                     shutil.rmtree(target)
                 return {"status": "ok"}
+            if operation == "append":
+                content = arguments.get("content", "")
+                with target.open("a", encoding="utf-8") as file:
+                    file.write(content)
+                return {"status": "ok", "path": str(target), "bytes_appended": len(content), "operation": "append"}
+            if operation in {"copy", "move"}:
+                destination = self._resolve(arguments.get("destination", ""))
+                if destination.is_dir():
+                    destination = destination / target.name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if operation == "copy":
+                    if target.is_dir():
+                        shutil.copytree(target, destination, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(target, destination)
+                else:
+                    shutil.move(str(target), str(destination))
+                return {"status": "ok", "path": str(destination), "operation": operation}
+            if operation == "mkdir":
+                target.mkdir(parents=True, exist_ok=True)
+                return {"status": "ok", "path": str(target), "operation": "mkdir"}
+            if operation == "search":
+                pattern = str(arguments.get("pattern", ""))
+                if not pattern:
+                    return {"status": "error", "message": "Search pattern is required"}
+                matches = []
+                for candidate in self.root.rglob("*"):
+                    if len(matches) >= 50:
+                        break
+                    if pattern in candidate.name:
+                        matches.append({"path": str(candidate.relative_to(self.root)), "is_dir": candidate.is_dir()})
+                return {"status": "ok", "items": matches, "operation": "search"}
             return {"status": "error", "message": f"Unknown operation: {operation}"}
         except PermissionError as exc:
             return {"status": "error", "message": str(exc)}

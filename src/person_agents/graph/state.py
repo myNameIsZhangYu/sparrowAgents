@@ -29,5 +29,6 @@ class AgentState(TypedDict):
     subtasks: list[dict[str, Any]]
     pending_subtask_ids: list[str]
     subtask_results: Annotated[list[dict[str, Any]], replace_list]
+    session_summary: str
     # 记录首次进入图的时间，用于 critic 的长时间循环自检。
     started_at: float | None
