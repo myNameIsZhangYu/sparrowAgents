@@ -8,6 +8,7 @@ from openai import OpenAIError
 
 from person_agents.config.settings import settings
 from person_agents.llm.client import LLMResponse, call_llm
+from person_agents.runtime.llm_settings import latest_llm_settings
 
 logger = structlog.get_logger()
 
@@ -37,9 +38,6 @@ def load_fallback_chain(path: Path | None = None) -> list[dict[str, Any]]:
 
 
 async def call_with_fallback(messages: list[dict[str, str]]) -> LLMResponse:
-    from person_agents.config.settings import settings
-    from person_agents.runtime.llm_settings import latest_llm_settings
-
     chain = load_fallback_chain()
     runtime = latest_llm_settings()
     if runtime:
@@ -57,7 +55,7 @@ async def call_with_fallback(messages: list[dict[str, str]]) -> LLMResponse:
         if provider == "ollama":
             try:
                 # 本地模型先做健康探测，减少主请求超时等待。
-                async with httpx.AsyncClient(timeout=2) as client:
+                async with httpx.AsyncClient(timeout=2, trust_env=False) as client:
                     resp = await client.get(settings.ollama_base_url.rstrip("/") + "/api/tags")
                 if resp.status_code != 200:
                     logger.info("skipping_ollama_unhealthy", status=resp.status_code)
@@ -83,3 +81,28 @@ async def call_with_fallback(messages: list[dict[str, str]]) -> LLMResponse:
                 logger.warning("llm_attempt_failed", model=model, provider=provider, attempt=attempt, error=str(exc))
     # 保留最后一个异常作为根因，便于外层日志和客户端健康判断。
     raise LLMFallbackError(f"All models in fallback chain failed: {last_error}") from last_error
+
+
+async def llm_is_available() -> bool:
+    chain = load_fallback_chain()
+    runtime = latest_llm_settings()
+    if runtime:
+        for entry in chain:
+            if entry.get("provider") == "openai":
+                entry["base_url"] = runtime.openai_base_url
+                entry["model"] = runtime.openai_model
+    for entry in chain:
+        provider = entry.get("provider", "openai")
+        if provider != "ollama" and not (runtime or settings.openai_api_key):
+            continue
+        if provider == "ollama":
+            try:
+                async with httpx.AsyncClient(timeout=2) as client:
+                    resp = await client.get(settings.ollama_base_url.rstrip("/") + "/api/tags")
+                if resp.status_code == 200:
+                    return True
+            except httpx.HTTPError:
+                continue
+        else:
+            return True
+    return False

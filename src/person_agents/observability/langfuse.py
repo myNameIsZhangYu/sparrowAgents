@@ -7,18 +7,37 @@ from person_agents.config.settings import settings
 logger = structlog.get_logger()
 
 _client = None
+_tracing_disabled = False
+
+
+def shutdown_langfuse() -> None:
+    global _client, _tracing_disabled
+    if _client is not None:
+        try:
+            _client.shutdown()
+        except Exception:
+            logger.warning("langfuse_shutdown_failed", exc_info=True)
+    _client = None
+    _tracing_disabled = False
 
 
 def get_langfuse():
-    global _client
-    if _client is None and settings.langfuse_public_key and settings.langfuse_secret_key:
+    global _tracing_disabled, _client
+    if _tracing_disabled or settings.testing or not (settings.langfuse_public_key and settings.langfuse_secret_key):
+        return None
+    if _client is None:
         from langfuse import Langfuse
-        # 没有密钥时返回 None，业务调用直接跳过 tracing。
-        _client = Langfuse(
+
+        try:
+            _client = Langfuse(
             public_key=settings.langfuse_public_key,
             secret_key=settings.langfuse_secret_key,
             host=settings.langfuse_host,
-        )
+            tracing_enabled=settings.langfuse_enabled,
+            )
+        except (TypeError, ValueError):
+            _tracing_disabled = True
+            return None
     return _client
 
 

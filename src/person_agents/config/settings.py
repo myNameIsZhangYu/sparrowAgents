@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     app_name: str = "person-agents"
     debug: bool = False
+    testing: bool = False
 
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
@@ -29,12 +30,21 @@ class Settings(BaseSettings):
         default=Path.home() / ".person-agents" / "memory.db",
         validation_alias=AliasChoices("PERSON_AGENTS_SQLITE_PATH", "SQLITE_PATH"),
     )
+    audit_db_path: Path = Field(
+        default=Path.home() / ".person-agents" / "audit.db",
+        validation_alias=AliasChoices("PERSON_AGENTS_AUDIT_DB_PATH", "AUDIT_DB_PATH"),
+    )
     chroma_path: Path = Field(
         default=Path.home() / ".person-agents" / "chroma",
         validation_alias=AliasChoices("PERSON_AGENTS_CHROMA_PATH", "CHROMA_PATH"),
     )
+    chroma_model_cache_path: Path = Field(
+        default=Path.home() / ".cache" / "chroma" / "onnx_models" / "all-MiniLM-L6-v2",
+        validation_alias=AliasChoices("PERSON_AGENTS_CHROMA_MODEL_CACHE_PATH", "CHROMA_MODEL_CACHE_PATH"),
+    )
 
     langfuse_host: str = "http://localhost:3000"
+    langfuse_enabled: bool = True
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
 

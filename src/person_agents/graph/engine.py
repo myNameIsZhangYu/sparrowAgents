@@ -1,4 +1,5 @@
 
+import asyncio
 import time
 from typing import Any
 
@@ -6,7 +7,6 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from person_agents.config.settings import settings
-from person_agents.governance.policy import PolicyEngine
 from person_agents.graph.edges import (
     route_after_critic,
     route_after_executor,
@@ -20,9 +20,14 @@ from person_agents.graph.nodes import (
     intent_node,
     memory_write_node,
     planner_node,
+    run_tool_step,
 )
 from person_agents.graph.state import AgentState
-from person_agents.middleware import governed_tool_call
+from person_agents.graph.task_graph import (
+    AgentCapabilityRegistry,
+    normalize_plan_to_task_graph,
+)
+from person_agents.llm.fallback import llm_is_available
 from person_agents.observability.metrics import agent_run_duration_seconds, agent_runs_total
 from person_agents.security.context import RequestContext
 
@@ -35,6 +40,20 @@ GREETING_REPLIES = {
     "hi there": "Hi! How can I help you today?",
     "hello there": "Hello! How can I help you today?",
 }
+
+agent_capabilities = AgentCapabilityRegistry()
+agent_capabilities.register(
+    "executor",
+    task_types=["llm"],
+    allowed_tools=["none"],
+    max_concurrency=4,
+)
+agent_capabilities.register(
+    "tool",
+    task_types=["tool_use"],
+    allowed_tools=["filesystem", "shell"],
+    max_concurrency=2,
+)
 
 
 def _fast_reply(user_input: str) -> str | None:
@@ -56,7 +75,24 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     result = {"current_agent": specialist, "agent_history": ["supervisor"]}
     agent_runs_total.labels(agent="supervisor", status="success").inc()
     agent_run_duration_seconds.labels(agent="supervisor").observe(time.monotonic() - started)
-    return result
+    if specialist == "executor":
+        prompt = state.get("messages", [{}])[-1].get("content", "")
+        subtasks = normalize_plan_to_task_graph(state.get("plan", [{"action": prompt, "tool": "none"}]), prompt)
+        for task in subtasks:
+            selected = agent_capabilities.select(
+                "tool_use" if task["tool"] != "none" else "llm",
+                allowed_tools=[task["tool"]],
+            )
+            if selected:
+                task["agent"] = selected
+        return {
+            **result,
+            "subtasks": subtasks,
+            "pending_subtask_ids": [task["id"] for task in subtasks],
+            "subtask_results": [],
+            "delegation_method": "capability_registry",
+        }
+    return {**result, "subtasks": [], "pending_subtask_ids": [], "subtask_results": []}
 
 
 async def execution_specialist(state: AgentState) -> dict[str, Any]:
@@ -69,7 +105,7 @@ async def execution_specialist(state: AgentState) -> dict[str, Any]:
     return result
 
 
-async def tool_specialist(state: AgentState, registry: Any | None = None) -> dict[str, Any]:
+async def tool_specialist(state: AgentState, registry: Any | None = None, services: Any | None = None) -> dict[str, Any]:
     started = time.monotonic()
     resolved_registry = registry
     if resolved_registry is None:
@@ -79,44 +115,27 @@ async def tool_specialist(state: AgentState, registry: Any | None = None) -> dic
         resolved_registry = _get_registry()
     step = state["plan"][state["current_step"]]
     tool = step.get("tool", "none")
-    tool_def = resolved_registry.get(tool)
-    # 从图状态重建工具调用的租户安全上下文。
-    context = RequestContext(
-        user_id=state.get("owner_user_id", state.get("session_id", "local")),
-        tenant_id=state.get("tenant_id", "default"),
-        session_id=state.get("session_id", "cli"),
-    )
-    if not tool_def:
-        # 未知工具必须降级，而不是静默执行或抛出未处理异常。
-        output = f"Unknown tool: {tool}"
-        degraded = True
-        error = output
-    else:
-        arguments = step.get("arguments") or {}
-        # 所有工具调用都经过限流、权限、schema、确认、审计中间件。
-        tool_result = await governed_tool_call(
-            tool,
-            arguments,
-            tool_def.handler,
-            context=context,
-            tool_schema=tool_def.parameters,
-            requires_confirmation=tool_def.requires_confirm,
-        )
-        output = tool_result if isinstance(tool_result, dict) and tool_result.get("status") == "confirmation_required" else str(tool_result)
-        if not isinstance(output, dict):
-            # 输出内容也要过治理，防止敏感信息回传给调用方。
-            output_allowed, governed_output = PolicyEngine().sanitize_tool_output(output)
-            if not output_allowed:
-                output = governed_output
-                degraded = True
-                error = governed_output
-        if "degraded" not in locals():
-            # 只有确认请求和未降级路径会进入这里。
-            degraded = False
-            error = None
+    tool_result = await run_tool_step(step, state, resolved_registry, services=services)
+    output = tool_result["output"]
+    degraded = tool_result["degraded"]
+    error = tool_result["error"]
     history = state.get("agent_history", [])
     # 连续工具调用只记录一次 tool 身份，保持 agent_history 可读。
     history = [*history, "tool"] if not history or history[-1] != "tool" else history
+    if isinstance(output, dict) and output.get("status") == "confirmation_required":
+        confirmation_output = {
+            **output,
+            "tool": tool,
+            "arguments": step.get("arguments") or {},
+        }
+        return {
+            "tool_results": [*state.get("tool_results", []), {"step": state["current_step"], "action": step.get("action", ""), "tool": tool, "output": confirmation_output}],
+            "current_step": state["current_step"] + 1,
+            "current_agent": "tool",
+            "agent_history": history,
+            "status": "confirmation_required",
+            "pending_confirmation": confirmation_output["confirmation_token"],
+        }
     result = {
         "tool_results": [*state.get("tool_results", []), {"step": state["current_step"], "action": step.get("action", ""), "tool": tool, "output": output}],
         "current_step": state["current_step"] + 1,
@@ -139,21 +158,38 @@ def _observe_agent(agent: str, started: float, status: str = "success") -> None:
 
 def build_graph(checkpointer: AsyncSqliteSaver | None = None, services: Any | None = None):
     builder = StateGraph(AgentState)
+    # LangGraph 同步条件路由会经过默认线程执行器；取消后该池可能阻塞解释器退出。
+    # 这里统一包装为异步路由，保持 CLI/测试的生命周期可关闭。
+    async def route_after_planner_async(state: AgentState) -> str:
+        return route_after_planner(state)
+
+    async def route_after_tool_async(state: AgentState) -> str:
+        return route_after_tool(state)
+
+    async def route_after_supervisor_async(state: AgentState) -> str:
+        return route_after_supervisor(state)
+
+    async def route_after_executor_async(state: AgentState) -> str:
+        return route_after_executor(state)
+
+    async def route_after_critic_async(state: AgentState) -> str:
+        return route_after_critic(state)
+
     async def tool_node(state: AgentState) -> dict[str, Any]:
         # 闭包捕获注入的 registry，避免使用模块全局状态。
-        return await tool_specialist(state, registry=services.registry if services else None)
+        return await tool_specialist(state, registry=services.registry if services else None, services=services)
 
     builder.add_node("tool_specialist", tool_node)
     builder.add_conditional_edges(
         "planner",
-        route_after_planner,
+        route_after_planner_async,
         # 注意：router 返回 execution_agent 时，实际执行节点是 executor。
         {"tool_specialist": "tool_specialist", "execution_agent": "executor"},
     )
     builder.add_conditional_edges(
         "tool_specialist",
-        route_after_tool,
-        {"critic": "critic"},
+        route_after_tool_async,
+        {"executor": "executor", "critic": "critic", END: END},
     )
     if services is not None:
         # 注入服务是生产 API / worker 的主路径，保证依赖可替换、可测试。
@@ -161,7 +197,7 @@ def build_graph(checkpointer: AsyncSqliteSaver | None = None, services: Any | No
             return await intent_node(state, vector=services.vector)
 
         async def injected_planner(state: AgentState) -> dict[str, Any]:
-            return await planner_node(state, registry=services.registry)
+            return await planner_node(state, registry=services.registry, services=services)
 
         async def injected_memory(state: AgentState) -> dict[str, Any]:
             return await memory_write_node(state, store=services.store, vector=services.vector)
@@ -176,19 +212,22 @@ def build_graph(checkpointer: AsyncSqliteSaver | None = None, services: Any | No
         builder.add_node("memory_write", memory_write_node)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("execution_agent", execution_specialist)
-    builder.add_node("executor", executor_node)
+    async def executor_with_services(state: AgentState) -> dict[str, Any]:
+        return await executor_node(state, services=services)
+
+    builder.add_node("executor", executor_with_services)
     builder.add_node("critic", critic_node)
 
     builder.add_edge(START, "intent")
     builder.add_edge("intent", "supervisor")
     builder.add_conditional_edges(
         "supervisor",
-        route_after_supervisor,
+        route_after_supervisor_async,
         {"execution_agent": "execution_agent", "memory_write": "memory_write"},
     )
     builder.add_edge("execution_agent", "planner")
-    builder.add_conditional_edges("executor", route_after_executor, {"executor": "executor", "critic": "critic"})
-    builder.add_conditional_edges("critic", route_after_critic, {"executor": "executor", "memory_write": "memory_write"})
+    builder.add_conditional_edges("executor", route_after_executor_async, {"executor": "executor", "critic": "critic"})
+    builder.add_conditional_edges("critic", route_after_critic_async, {"executor": "executor", "memory_write": "memory_write"})
     builder.add_edge("memory_write", END)
 
     if checkpointer is None:
@@ -225,8 +264,12 @@ async def run_graph(
         "owner_user_id": context.user_id,
         "current_agent": "",
         "agent_history": [],
+        "pending_confirmation": None,
         # loop guard 依赖该时间戳自检是否已运行过久。
         "started_at": time.monotonic(),
+        "subtasks": [],
+        "pending_subtask_ids": [],
+        "subtask_results": [],
     }
 
     # 打招呼等低风险请求直接返回，节省 LLM 成本和延迟。
@@ -237,12 +280,36 @@ async def run_graph(
             "intent": "chat",
             "current_agent": "supervisor",
             "tool_results": [{"step": 0, "action": "greeting", "tool": "none", "output": reply}],
+            "pending_confirmation": None,
             "status": "completed",
             "degraded": False,
+                "subtasks": [],
+                "pending_subtask_ids": [],
+                "subtask_results": [],
+        }
+    if not await llm_is_available():
+        return {
+            **initial_state,
+            "intent": "task",
+            "current_agent": "supervisor",
+            "status": "failed",
+            "degraded": True,
+            "error": "No LLM provider is available",
+            "tool_results": [{"step": 0, "action": "llm_unavailable", "tool": "none", "output": "No LLM provider is available"}],
+            "pending_confirmation": None,
         }
 
     graph = build_graph(services=services)
     # session_id 用作 checkpoint thread，维持同一会话状态。
-    config = {"configurable": {"thread_id": session_id}}
-    result = await graph.ainvoke(initial_state, config)
+    # 显式为本轮创建 executor，避免默认全局线程池在取消后阻塞解释器退出。
+    config = {"configurable": {"thread_id": session_id}, "max_concurrency": 4}
+    try:
+        result = await asyncio.wait_for(graph.ainvoke(initial_state, config), timeout=settings.run_timeout_s)
+    finally:
+        aclose = getattr(graph, "aclose", None)
+        if aclose is not None:
+            await aclose()
+    if result.get("messages") and result["messages"][-1].get("role") == "user":
+        result["messages"][-1]["role"] = "assistant"
+        result["messages"][-1]["content"] = str(result.get("tool_results", [{}])[-1].get("output", ""))
     return result

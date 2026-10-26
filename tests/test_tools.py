@@ -15,6 +15,8 @@ class TestMCPFilesystem:
     async def test_write_and_read(self, fs: MCPFilesystemTool) -> None:
         result = await fs.call({"operation": "write", "path": "test.txt", "content": "hello"})
         assert result["status"] == "ok"
+        assert result["path"] == str(fs.root / "test.txt")
+        assert result["bytes_written"] == 5
         result = await fs.call({"operation": "read", "path": "test.txt"})
         assert result["content"] == "hello"
 

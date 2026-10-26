@@ -44,7 +44,7 @@ def test_registry_identity_and_legacy_fallback(tmp_path: Path, monkeypatch) -> N
     )
     monkeypatch.setattr(
         "person_agents.security.auth.CredentialManager",
-        lambda: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
     )
     context = resolve_request_context("legacy")
     assert context.user_id.startswith("user_")

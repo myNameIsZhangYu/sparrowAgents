@@ -1,5 +1,6 @@
 import re
 import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
@@ -36,14 +37,14 @@ class AuditRedactor:
 class AuditLogger:
     def __init__(self, db_path: Path | None = None):
         # 默认与主 SQLite 路径一致；测试可指定独立文件。
-        self.db_path = db_path or settings.sqlite_path
+        self.db_path = db_path or settings.audit_db_path
         self._conn: sqlite3.Connection | None = None
 
     def connect(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path))
+            self._conn = sqlite3.connect(str(self.db_path), timeout=10)
             # WAL 降低审计并发写入阻塞概率。
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=10000")
             self._conn.execute("""CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -76,24 +77,33 @@ class AuditLogger:
         owner_user_id: str | None = None,
         tenant_id: str | None = None,
     ) -> None:
-        conn = self.connect()
-        # 先脱敏再入库；不落明文密钥、联系方式或完整大文本。
-        conn.execute(
-            "INSERT INTO audit_log (timestamp, agent, action, input, output, status, error, request_id, owner_user_id, tenant_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (
-                datetime.now(UTC).isoformat(),
-                agent,
-                action,
-                AuditRedactor.redact(input_data),
-                AuditRedactor.redact(output_data),
-                status,
-                AuditRedactor.redact(error),
-                request_id,
-                owner_user_id,
-                tenant_id,
-            ),
+        values = (
+            datetime.now(UTC).isoformat(),
+            agent,
+            action,
+            AuditRedactor.redact(input_data),
+            AuditRedactor.redact(output_data),
+            status,
+            AuditRedactor.redact(error),
+            request_id,
+            owner_user_id,
+            tenant_id,
         )
-        conn.commit()
+        for attempt in range(3):
+            conn = self.connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "INSERT INTO audit_log (timestamp, agent, action, input, output, status, error, request_id, owner_user_id, tenant_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    values,
+                )
+                conn.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                conn.rollback()
+                if "database is locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
     def purge_expired(self, retention_days: int) -> int:
         from datetime import timedelta

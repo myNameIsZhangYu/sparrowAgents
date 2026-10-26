@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import signal
 import sys
 from pathlib import Path
@@ -10,13 +11,18 @@ from rich.console import Console
 
 from person_agents import __version__
 from person_agents.config.settings import settings
-from person_agents.llm.fallback import LLMFallbackError
+from person_agents.graph.render import render_agent_result
+from person_agents.llm.fallback import LLMFallbackError, llm_is_available
 from person_agents.observability.cost import CostTracker
+from person_agents.observability.langfuse import shutdown_langfuse
 from person_agents.observability.logging import setup_logging
+from person_agents.security.context import RequestContext
 
 app = typer.Typer(name="person-agents", help="Personal agent CLI")
 console = Console()
 logger = structlog.get_logger()
+_cli_chat_session = f"cli-chat-{os.getpid()}"
+_cli_state = {"pending_confirmation": None, "workspace": None}
 
 
 def _signal_handler(sig: int, frame: object) -> None:
@@ -80,6 +86,10 @@ def _check_write(path) -> bool:
         return False
 
 
+def _shutdown_runtime_threads() -> None:
+    shutdown_langfuse()
+
+
 @app.command()
 def eval(
     output: str = typer.Option("", help="Write the JSON evaluation report to this path."),
@@ -108,6 +118,44 @@ def eval(
                 raise typer.Exit(code=2)
 
     asyncio.run(_eval())
+    shutdown_langfuse()
+
+
+@app.command("eval-multi-agent")
+def eval_multi_agent() -> None:
+    """Run the multi-agent task graph evaluation suite."""
+    setup_logging()
+
+    async def _eval():
+        from person_agents.eval.multi_agent_runner import run_multi_agent_eval
+
+        report = await run_multi_agent_eval()
+        console.print(json.dumps(report, ensure_ascii=False, indent=2))
+        if not report["passed"]:
+            raise typer.Exit(code=2)
+
+    asyncio.run(_eval())
+    shutdown_langfuse()
+
+
+@app.command("eval-cli-workflow")
+def eval_cli_workflow() -> None:
+    """Run the real create-file, confirm, and verify workflow."""
+    import tempfile
+
+    setup_logging()
+
+    async def _eval():
+        from person_agents.eval.cli_cases import run_cli_workflow_eval
+
+        with tempfile.TemporaryDirectory() as workspace:
+            report = await run_cli_workflow_eval(Path(workspace))
+        console.print(json.dumps(report, ensure_ascii=False, indent=2))
+        if not report["passed"]:
+            raise typer.Exit(code=2)
+
+    asyncio.run(_eval())
+    shutdown_langfuse()
 
 
 @app.command()
@@ -145,44 +193,93 @@ def migrate() -> None:
 def run(
     prompt: str = typer.Argument(..., help="User prompt"),
     system: str = typer.Option("You are a helpful personal assistant.", help="System prompt"),
+    workspace: str = typer.Option("", help="Workspace directory for file tools; empty means current directory."),
 ) -> None:
     """Send a prompt through the LLM fallback chain."""
     setup_logging()
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
+    # 先做轻量可用性探测；避免无模型时启动图运行时和计时器。
+    if not asyncio.run(llm_is_available()):
+        console.print("No LLM provider is available")
+        raise typer.Exit(code=1)
+
     # 当前 CLI tracker 只用于会话展示，不参与服务端配额。
     CostTracker(session_id="cli-session")
 
     async def _run():
-        final_output = await _run_agent_prompt(prompt, "cli-run")
+        try:
+            final_output = await _run_agent_prompt(prompt, "cli-run", workspace=workspace)
+        except LLMFallbackError as exc:
+            console.print(f"[red]Agent execution failed: {exc}[/red]")
+            raise typer.Exit(code=1) from exc
         if final_output:
             console.print(final_output)
         else:
             console.print("[dim]Task completed.[/dim]")
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    except TimeoutError:
+        console.print("[red]Agent execution timed out.[/red]")
+    finally:
+        _shutdown_runtime_threads()
+    raise typer.Exit()
 
 
-async def _run_agent_prompt(prompt: str, session_id: str) -> str:
-    from person_agents.graph.engine import run_graph
+async def _run_agent_prompt(prompt: str, session_id: str, workspace: str = "") -> str:
+    from person_agents.graph import engine
     from person_agents.graph.runtime import GraphServices
-    from person_agents.security.context import RequestContext
+
+    run_graph = engine.run_graph
 
     # CLI 使用默认服务组合；run_graph 内部仍处理 fast reply 与循环守卫。
     result = await run_graph(
         prompt,
         session_id=session_id,
         context=RequestContext(user_id=session_id, tenant_id="default", session_id=session_id),
-        services=GraphServices.default(),
+        services=GraphServices.default(workspace_root=workspace or None),
     )
-    return result.get("tool_results", [{}])[-1].get("output", "") if result.get("tool_results") else ""
+    if result.get("status") == "confirmation_required":
+        _cli_state["pending_confirmation"] = result.get("pending_confirmation")
+        _cli_state["workspace"] = workspace or str(Path.cwd())
+    return render_agent_result(result)
+
+
+async def _complete_pending_tool(confirmation_token: str, session_id: str) -> str:
+    from person_agents.graph.runtime import GraphServices
+    from person_agents.graph.tool_confirmation import confirm_pending_tool
+
+    services = GraphServices.default(workspace_root=_cli_state.get("workspace"))
+    result = await confirm_pending_tool(
+        confirmation_token,
+        context=RequestContext(user_id=session_id, tenant_id="default", session_id=session_id),
+        registry=services.registry,
+        services=services,
+        resume=True,
+        session_id=session_id,
+    )
+    if isinstance(result, dict) and result.get("status") == "confirmation_required":
+        return f"仍需确认：/confirm {result.get('confirmation_token')}"
+    if not isinstance(result, dict):
+        return str(result)
+    return render_agent_result(result)
 
 
 @app.command()
-def chat() -> None:
+def chat(
+    workspace: str = typer.Option("", help="Workspace directory for file tools; empty means current directory."),
+) -> None:
     """Interactive chat loop."""
     setup_logging()
+    # uv 自带的 libedit readline 对多字节字符删除处理不完整；
+    # chat 使用系统终端输入，Backspace 可直接删除一个 Unicode 字符。
+    os.environ.pop("PYTHONSTARTUP", None)
+    import readline
+
+    readline.parse_and_bind("bind ^? backward-delete-char")
+    readline.parse_and_bind("bind ^H backward-delete-char")
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
     console.print("[bold]person-agents chat[/bold] (Ctrl+C to exit)")
@@ -195,7 +292,22 @@ def chat() -> None:
                 user_input = await asyncio.to_thread(console.input, "[bold blue]> [/bold blue]")
                 if not user_input.strip():
                     continue
-                final_output = await _run_agent_prompt(user_input, "cli-chat")
+                if user_input.startswith("/confirm"):
+                    token = user_input.removeprefix("/confirm").strip() or (_cli_state["pending_confirmation"] or "")
+                    if not token:
+                        console.print("[red]当前没有待确认操作。[/red]")
+                        continue
+                    try:
+                        console.print(await _complete_pending_tool(token, _cli_chat_session))
+                        if token == _cli_state["pending_confirmation"]:
+                            _cli_state["pending_confirmation"] = None
+                    except PermissionError as exc:
+                        console.print(f"[red]确认失败：{exc}[/red]")
+                        if _cli_state["pending_confirmation"]:
+                            console.print("可执行：")
+                            console.print(f"/confirm {_cli_state['pending_confirmation']}")
+                    continue
+                final_output = await _run_agent_prompt(user_input, _cli_chat_session, workspace=workspace)
                 if final_output:
                     console.print(final_output)
             except KeyboardInterrupt:
@@ -205,6 +317,7 @@ def chat() -> None:
                 console.print(f"[red]Error:[/red] {exc}")
 
     asyncio.run(_chat())
+    shutdown_langfuse()
 
 
 if __name__ == "__main__":

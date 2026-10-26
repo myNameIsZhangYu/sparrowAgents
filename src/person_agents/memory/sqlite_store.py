@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -59,6 +60,20 @@ CREATE TABLE IF NOT EXISTS config_versions (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     PRIMARY KEY (kind, version_id)
 );
+CREATE TABLE IF NOT EXISTS agent_collaboration_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    correlation_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(session_id, event_type, from_agent, to_agent, task_id, correlation_id, payload_json)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_collaboration_session
+    ON agent_collaboration_events(session_id, correlation_id);
 """
 
 MIGRATIONS = [
@@ -86,9 +101,10 @@ class SQLiteStore:
 
     def connect(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path))
+            self._conn = sqlite3.connect(str(self.db_path), timeout=10)
             # WAL 提高并发读写能力；外键约束保证后续扩展的数据一致性。
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=10000")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
             for migration in MIGRATIONS:
@@ -222,6 +238,57 @@ class SQLiteStore:
         )
         conn.commit()
         return cursor.rowcount > 0
+
+    def append_agent_collaboration_event(
+        self,
+        session_id: str,
+        event_type: str,
+        from_agent: str,
+        to_agent: str,
+        task_id: str,
+        correlation_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        conn = self.connect()
+        conn.execute(
+            """INSERT OR IGNORE INTO agent_collaboration_events
+               (session_id, event_type, from_agent, to_agent, task_id, correlation_id, payload_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                event_type,
+                from_agent,
+                to_agent,
+                task_id,
+                correlation_id,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+        conn.commit()
+
+    def list_agent_collaboration_events(self, session_id: str, correlation_id: str) -> list[dict[str, Any]]:
+        rows = self.connect().execute(
+            """SELECT event_id, session_id, event_type, from_agent, to_agent, task_id,
+                      correlation_id, payload_json, created_at
+               FROM agent_collaboration_events
+               WHERE session_id=? AND correlation_id=?
+               ORDER BY event_id""",
+            (session_id, correlation_id),
+        ).fetchall()
+        return [
+            {
+                "event_id": row[0],
+                "session_id": row[1],
+                "event_type": row[2],
+                "from_agent": row[3],
+                "to_agent": row[4],
+                "task_id": row[5],
+                "correlation_id": row[6],
+                "payload": json.loads(row[7]),
+                "created_at": row[8],
+            }
+            for row in rows
+        ]
 
     def get_run(self, run_id: str, owner_user_id: str, tenant_id: str) -> dict[str, Any] | None:
         conn = self.connect()

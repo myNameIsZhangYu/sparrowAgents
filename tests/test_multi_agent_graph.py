@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 
 import pytest
@@ -69,17 +70,18 @@ async def test_compiled_graph_contains_multi_agent_topology():
 
 
 async def test_build_graph_uses_injected_services_without_module_globals():
+    import person_agents.graph.nodes as graph_nodes
     from person_agents.graph.engine import build_graph
-    from person_agents.graph.nodes import _registry, _store, _vector
+    graph_nodes._registry = None
 
     services = GraphServices(store=object(), vector=object(), registry=object())
 
     graph = build_graph(services=services)
 
     assert graph is not None
-    assert _store is None
-    assert _vector is None
-    assert _registry is None
+    assert graph_nodes._store is None
+    assert graph_nodes._vector is None
+    assert graph_nodes._registry is None
 
 
 async def test_default_graph_contains_tool_specialist():
@@ -118,7 +120,7 @@ async def test_tool_specialist_uses_injected_registry_and_preserves_attributes(m
     async def successful_tool_call(tool, arguments, handler, **kwargs):
         return await handler(arguments)
 
-    monkeypatch.setattr("person_agents.graph.engine.governed_tool_call", successful_tool_call)
+    monkeypatch.setattr("person_agents.graph.nodes.governed_tool_call", successful_tool_call)
 
     state = {
         "agent_history": ["supervisor"],
@@ -151,7 +153,7 @@ async def test_tool_specialist_preserves_confirmation_payload(monkeypatch):
     async def confirmation_tool_call(tool, arguments, handler, **kwargs):
         return {"status": "confirmation_required", "confirmation_token": "token"}
 
-    monkeypatch.setattr("person_agents.graph.engine.governed_tool_call", confirmation_tool_call)
+    monkeypatch.setattr("person_agents.graph.nodes.governed_tool_call", confirmation_tool_call)
 
     result = await tool_specialist(
         {
@@ -165,7 +167,127 @@ async def test_tool_specialist_preserves_confirmation_payload(monkeypatch):
     assert result["tool_results"][0]["output"] == {
         "status": "confirmation_required",
         "confirmation_token": "token",
+        "tool": "filesystem",
+        "arguments": {},
     }
+
+
+async def test_planner_strips_markdown_fence_before_parsing(monkeypatch):
+    from person_agents.graph.nodes import planner_node
+
+    class Response:
+        content = '```json\n[{"action":"write binary_search.py","tool":"filesystem","arguments":{"operation":"write","path":"binary_search.py","content":"print(1)"}}]\n```'
+        degraded = False
+
+    async def response_call(messages):
+        return Response()
+
+    monkeypatch.setattr("person_agents.graph.nodes.call_with_fallback", response_call)
+
+    result = await planner_node({"messages": [{"role": "user", "content": "write binary_search.py"}]})
+
+    assert result["plan"][0]["tool"] == "filesystem"
+    assert result["plan"][0]["arguments"]["path"] == "binary_search.py"
+
+
+async def test_planner_repairs_missing_filesystem_arguments(monkeypatch):
+    from person_agents.graph.nodes import planner_node
+
+    class Response:
+        content = '[{"action":"创建 binary_search.py，内容是二分查找","tool":"filesystem"}]'
+        degraded = False
+
+    async def response_call(messages):
+        return Response()
+
+    monkeypatch.setattr("person_agents.graph.nodes.call_with_fallback", response_call)
+
+    result = await planner_node({"messages": [{"role": "user", "content": "创建 binary_search.py，内容是二分查找"}]})
+
+    step = result["plan"][0]
+    assert step["tool"] == "filesystem"
+    assert step["arguments"]["operation"] == "read"
+    assert step["arguments"]["path"] == "创建 binary_search.py，内容是二分查找"
+
+
+async def test_degraded_tool_subtask_is_marked_failed(monkeypatch):
+    from person_agents.graph.nodes import executor_node
+
+    class Response:
+        content = "done"
+        model = "test-model"
+        prompt_tokens = 0
+        completion_tokens = 0
+        degraded = False
+
+    async def llm(messages):
+        return Response()
+
+    async def run_tool_step(step, state, registry=None, services=None):
+        return {"output": "Unknown tool: bad", "degraded": True, "error": "Unknown tool: bad"}
+
+    monkeypatch.setattr("person_agents.graph.nodes.run_tool_step", run_tool_step)
+    monkeypatch.setattr("person_agents.graph.nodes.call_with_fallback", llm)
+
+    result = await executor_node({
+        "messages": [{"role": "user", "content": "objective"}],
+        "plan": [{"action": "bad step", "tool": "bad"}, {"action": "second", "tool": "none"}],
+        "current_step": 0,
+        "memory_context": [],
+        "subtasks": [],
+        "subtask_results": [],
+        "owner_user_id": "user",
+        "tenant_id": "tenant",
+        "session_id": "session",
+    })
+
+    assert result["subtask_results"][0]["status"] == "failed"
+    assert result["subtask_results"][0]["error"] == "Unknown tool: bad"
+
+
+async def test_multi_step_confirmation_is_tracked_by_executor(monkeypatch):
+    from person_agents.graph.nodes import executor_node
+
+    class Response:
+        content = "done"
+        model = "test-model"
+        prompt_tokens = 0
+        completion_tokens = 0
+        degraded = False
+
+    async def response_call(messages):
+        return Response()
+
+    async def run_tool_step(step, state, registry=None, services=None):
+        return {
+            "output": {
+                "status": "confirmation_required",
+                "confirmation_token": "token-1",
+                "tool": "filesystem",
+                "arguments": {"operation": "write", "path": "mapao.py"},
+            },
+            "degraded": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("person_agents.graph.nodes.run_tool_step", run_tool_step)
+    monkeypatch.setattr("person_agents.graph.nodes.call_with_fallback", response_call)
+
+    result = await executor_node({
+        "messages": [{"role": "user", "content": "objective"}],
+        "plan": [{"action": "write file", "tool": "filesystem", "arguments": {"operation": "write", "path": "mapao.py"}}, {"action": "second", "tool": "none"}],
+        "current_step": 0,
+        "memory_context": [],
+        "subtasks": [],
+        "subtask_results": [],
+        "owner_user_id": "user",
+        "tenant_id": "tenant",
+        "session_id": "session",
+    })
+
+    print("RESULT", result, flush=True)
+    assert result["status"] == "confirmation_required"
+    assert result["pending_confirmation"] == "token-1"
 
 
 async def test_intent_node_uses_injected_vector(monkeypatch):
@@ -219,6 +341,85 @@ async def test_planner_node_uses_injected_registry(monkeypatch):
     result = await planner_node({"messages": [{"role": "user", "content": "hello"}]}, registry=Registry())
 
     assert result["plan"][0]["tool"] == "none"
+
+
+async def test_graph_cli_file_workflow_creates_confirmed_file(tmp_path, monkeypatch):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from person_agents.graph.engine import build_graph
+    from person_agents.graph.render import render_agent_result
+    from person_agents.tools.registry import ToolRegistry, register_default_tools
+
+    class FakeResponse:
+        content = ""
+        degraded = False
+
+        def __init__(self, content):
+            self.content = content
+
+    content = "def binary_search(values, target):\n    left, right = 0, len(values) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if values[mid] == target:\n            return mid\n        if values[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1\n"
+    plan = json.dumps([{"action":"write binary_search.py","tool":"filesystem","arguments":{"operation":"write","path":"binary_search.py","content":content}}])
+
+    async def fake_llm(messages):
+        return FakeResponse(plan)
+
+    async def governed_llm(messages, call_fn, context):
+        if "Evaluate if the task was completed successfully" in messages[0]["content"]:
+            return FakeResponse("success")
+        return await fake_llm(messages)
+
+    class Vector:
+        async def query(self, *args, **kwargs):
+            return []
+
+        async def add(self, *args, **kwargs):
+            return True
+
+    class Store:
+        async def upsert(self, *args, **kwargs):
+            return True
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace_root=str(tmp_path))
+    services = GraphServices(store=Store(), vector=Vector(), registry=registry)
+    monkeypatch.setattr("person_agents.graph.nodes.call_with_fallback", fake_llm)
+    monkeypatch.setattr("person_agents.graph.nodes.governed_llm_call", governed_llm)
+
+    graph = build_graph(checkpointer=MemorySaver(), services=services)
+    state = {
+        "messages": [{"role": "user", "content": "创建python文件，写一个二分查找算法"}],
+        "intent": "",
+        "plan": [],
+        "current_step": 0,
+        "tool_results": [],
+        "critic_feedback": "",
+        "memory_context": [],
+        "status": "",
+        "degraded": False,
+        "error": None,
+        "retry_count": 0,
+        "session_id": "file-e2e",
+        "tenant_id": "tenant",
+        "owner_user_id": "user",
+        "current_agent": "",
+        "agent_history": [],
+        "pending_confirmation": None,
+        "subtasks": [],
+        "pending_subtask_ids": [],
+        "subtask_results": [],
+    }
+
+    try:
+        result = await asyncio.wait_for(graph.ainvoke(state, {"configurable": {"thread_id": "file-e2e"}}), 20)
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        raise
+
+    print("RESULT", result, flush=True)
+    assert result["status"] == "confirmation_required"
+    assert "/confirm" in render_agent_result(result)
+    assert not (tmp_path / "binary_search.py").exists()
 
 
 async def test_memory_node_uses_injected_services():
@@ -336,7 +537,7 @@ async def test_injected_graph_end_to_end_tool_flow(tmp_path, monkeypatch):
     async def governed_llm(messages, call_fn, context):
         return await fake_llm(messages)
 
-    monkeypatch.setattr("person_agents.graph.engine.governed_tool_call", governed_tool)
+    monkeypatch.setattr("person_agents.graph.nodes.governed_tool_call", governed_tool)
     monkeypatch.setattr("person_agents.graph.nodes.call_with_fallback", fake_llm)
     monkeypatch.setattr("person_agents.graph.nodes.governed_llm_call", governed_llm)
     monkeypatch.setattr("person_agents.middleware.trace_llm_call", lambda *args, **kwargs: None)
@@ -401,7 +602,7 @@ async def test_run_graph_accepts_services_and_preserves_api_contract(monkeypatch
     monkeypatch.setattr("person_agents.graph.engine.build_graph", fake_build_graph)
 
     result = await run_graph(
-        "hello",
+        "objective",
         session_id="session",
         context=RequestContext(user_id="user", tenant_id="tenant", session_id="session"),
         services=GraphServices(store=object(), vector=object(), registry=object()),
@@ -532,10 +733,10 @@ async def test_cli_run_uses_injected_services(monkeypatch):
     monkeypatch.setattr("person_agents.graph.engine.run_graph", fake_run_graph)
     monkeypatch.setattr(
         "person_agents.graph.runtime.GraphServices.default",
-        staticmethod(lambda: expected),
+        staticmethod(lambda workspace_root=None: expected),
     )
 
-    result = await _run_agent_prompt("hello", "cli-run")
+    result = await _run_agent_prompt("hello", "cli-run", workspace="/tmp/workspace")
 
     assert result == "ok"
     assert captured["services"] is expected
@@ -554,11 +755,21 @@ async def test_cli_chat_uses_injected_services(monkeypatch):
     monkeypatch.setattr("person_agents.graph.engine.run_graph", fake_run_graph)
     monkeypatch.setattr(
         "person_agents.graph.runtime.GraphServices.default",
-        staticmethod(lambda: expected),
+        staticmethod(lambda workspace_root=None: expected),
     )
 
     assert await _run_agent_prompt("hello", "cli-chat") == "hello"
     assert calls == [("cli-chat", expected)]
+
+
+def test_graph_services_default_uses_requested_workspace(monkeypatch, tmp_path):
+    monkeypatch.setattr("person_agents.graph.nodes._registry", None)
+
+    services = GraphServices.default(workspace_root=str(tmp_path))
+
+    assert services.registry.get("filesystem").handler.__closure__ is not None
+    root = services.registry.get("filesystem").handler.__closure__[0].cell_contents.root
+    assert root == tmp_path.resolve()
 
 
 async def test_api_run_uses_injected_services(monkeypatch):
@@ -615,13 +826,14 @@ async def test_api_lifespan_installs_default_graph_services(monkeypatch):
     reason="RUN_LANGGRAPH_E2E is not enabled",
 )
 async def test_injected_graph_routes_tool_step_to_specialist():
+    import person_agents.graph.nodes as graph_nodes
     from person_agents.graph.engine import build_graph
-    from person_agents.graph.nodes import _registry
+    graph_nodes._registry = None
 
     services = GraphServices(store=object(), vector=object(), registry=object())
     graph = build_graph(services=services)
 
-    assert _registry is None
+    assert graph_nodes._registry is None
     assert "tool_specialist" in set(graph.get_graph().nodes)
     edges = {
         (edge.source, edge.target)

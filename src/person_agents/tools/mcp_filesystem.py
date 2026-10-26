@@ -37,7 +37,7 @@ class MCPFilesystemTool:
                 # 写入前自动创建父目录，保持一次性工具调用语义简单。
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
-                return {"status": "ok", "bytes_written": len(content)}
+                return {"status": "ok", "path": str(target), "bytes_written": len(content)}
             if operation == "list":
                 if target.is_dir():
                     items = [{"name": p.name, "is_dir": p.is_dir()} for p in sorted(target.iterdir())]

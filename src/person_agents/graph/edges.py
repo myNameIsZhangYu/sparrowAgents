@@ -1,4 +1,6 @@
 # 图路由规则集中在这里，确保节点返回值与 LangGraph edge 映射保持一致。
+from langgraph.graph import END
+
 from person_agents.graph.state import AgentState
 
 MAX_RETRIES = 3
@@ -12,9 +14,12 @@ def route_after_supervisor(state: AgentState) -> str:
 
 
 def route_after_critic(state: AgentState) -> str:
-    # 仅在 critic 明确要求 retry 且未超过次数上限时继续重试。
+    # 没有失败子任务时不重试；只有失败子任务才进入选择性重试。
+    subtasks = state.get("subtasks", [])
+    if subtasks and not any(task.get("status") == "failed" for task in subtasks):
+        return "memory_write"
     retry_count = state.get("retry_count", 0)
-    if state["critic_feedback"] == "retry" and retry_count < MAX_RETRIES:
+    if state["critic_feedback"] == "retry" and retry_count <= MAX_RETRIES:
         return "executor"
     return "memory_write"
 
@@ -35,6 +40,8 @@ def route_after_planner(state: AgentState) -> str:
 
 
 def route_after_tool(state: AgentState) -> str:
+    if state.get("pending_confirmation"):
+        return END
     # 工具调用推进了 current_step，仍剩余步骤时回 executor。
     if state.get("current_step", 0) < len(state.get("plan", [])):
         return "executor"
