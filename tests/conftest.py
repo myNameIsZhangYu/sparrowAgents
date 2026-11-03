@@ -20,6 +20,7 @@ def disable_runtime_integrations(monkeypatch):
     monkeypatch.setattr(settings, "data_dir", data_dir)
     monkeypatch.setattr(settings, "sqlite_path", data_dir / "memory.db")
     monkeypatch.setattr(settings, "audit_db_path", data_dir / "audit.db")
+    monkeypatch.setattr(settings, "state_db_path", data_dir / "state.db")
     from person_agents.middleware import _audit
 
     if hasattr(_audit, "db_path"):

@@ -50,6 +50,7 @@ async def run_one(job: dict, store, worker_id: str = "inline", lease_seconds: in
         tenant_id=job["tenant_id"],
         session_id=job["session_id"],
     )
+    slot_id = rate_limiter.allow_run(job["owner_user_id"], job["tenant_id"])
     try:
         graph_task = asyncio.create_task(
             run_graph(job["prompt"], session_id=job["session_id"], context=context, services=services)
@@ -114,6 +115,7 @@ async def run_one(job: dict, store, worker_id: str = "inline", lease_seconds: in
         cancellation_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cancellation_task
+        rate_limiter.release_run_slot(slot_id, job["owner_user_id"], job["tenant_id"])
 
     run_attempts_total.labels("completed").inc()
 

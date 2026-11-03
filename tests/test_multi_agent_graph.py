@@ -122,7 +122,7 @@ async def test_tool_specialist_uses_injected_registry_and_preserves_attributes(m
     async def successful_tool_call(tool, arguments, handler, **kwargs):
         return await handler(arguments)
 
-    monkeypatch.setattr("person_agents.graph.nodes.governed_tool_call", successful_tool_call)
+    monkeypatch.setattr("person_agents.graph.engine.governed_tool_call", successful_tool_call)
 
     state = {
         "agent_history": ["supervisor"],
@@ -155,7 +155,7 @@ async def test_tool_specialist_preserves_confirmation_payload(monkeypatch):
     async def confirmation_tool_call(tool, arguments, handler, **kwargs):
         return {"status": "confirmation_required", "confirmation_token": "token"}
 
-    monkeypatch.setattr("person_agents.graph.nodes.governed_tool_call", confirmation_tool_call)
+    monkeypatch.setattr("person_agents.graph.engine.governed_tool_call", confirmation_tool_call)
 
     result = await tool_specialist(
         {
@@ -539,7 +539,7 @@ async def test_injected_graph_end_to_end_tool_flow(tmp_path, monkeypatch):
     async def governed_llm(messages, call_fn, context):
         return await fake_llm(messages)
 
-    monkeypatch.setattr("person_agents.graph.nodes.governed_tool_call", governed_tool)
+    monkeypatch.setattr("person_agents.graph.engine.governed_tool_call", governed_tool)
     monkeypatch.setattr("person_agents.graph.nodes.call_with_fallback", fake_llm)
     monkeypatch.setattr("person_agents.graph.nodes.governed_llm_call", governed_llm)
     monkeypatch.setattr("person_agents.middleware.trace_llm_call", lambda *args, **kwargs: None)

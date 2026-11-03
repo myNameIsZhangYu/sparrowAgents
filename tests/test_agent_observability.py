@@ -29,7 +29,7 @@ async def test_agent_metrics_record_tool_failure(monkeypatch):
     assert (after or 0) == (before or 0) + 1
 
 
-async def test_agent_metrics_observe_tool_duration():
+async def test_agent_metrics_observe_tool_duration(monkeypatch):
 
     class Tool:
         def __init__(self):
@@ -49,14 +49,8 @@ async def test_agent_metrics_observe_tool_duration():
     async def successful_tool_call(tool, arguments, handler, **kwargs):
         return await handler(arguments)
 
-    import pytest
-
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr("person_agents.graph.engine.governed_tool_call", successful_tool_call)
-    try:
-        await _run_case(Registry())
-    finally:
-        monkeypatch.undo()
+    await _run_case(Registry())
 
 
 async def _run_case(registry):

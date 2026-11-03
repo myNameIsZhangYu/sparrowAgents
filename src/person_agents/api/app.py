@@ -3,6 +3,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
+from typing import Any
 
 import redis
 import sqlalchemy.exc
@@ -18,10 +19,9 @@ from person_agents.graph.runtime import GraphServices
 from person_agents.llm.fallback import LLMFallbackError
 from person_agents.memory.postgres_store import PostgresStore
 from person_agents.memory.sqlite_store import SQLiteStore
-from person_agents.middleware import _confirmations
+from person_agents.middleware import get_confirmation_store, get_middleware_state_store
 from person_agents.runtime.job_store import AsyncPostgresJobAdapter
 from person_agents.runtime.jobs import JobManager
-from person_agents.runtime.state import create_state_store
 from person_agents.security.auth import SecurityError, resolve_request_context
 from person_agents.security.context import RequestContext
 
@@ -51,12 +51,19 @@ _context_dependency = Depends(current_context)
 _pg_store: PostgresStore | None = PostgresStore() if settings.postgres_dsn else None
 _store = AsyncPostgresJobAdapter(_pg_store) if _pg_store else SQLiteStore()
 _jobs = JobManager(_store)
-_state_store = create_state_store(settings.redis_url)
+_state_store: Any | None = None
 _rate_limiter = RateLimiter(
-    _state_store,
+    None,
     max_running_runs=settings.tenant_max_running_runs,
     daily_run_limit=settings.tenant_daily_run_limit,
 )
+
+
+def get_app_state_store() -> Any:
+    global _state_store
+    if _state_store is None:
+        _state_store = get_middleware_state_store()
+    return _state_store
 
 
 @app.middleware("http")
@@ -116,7 +123,7 @@ async def readyz() -> Response:
     if settings.redis_url:
         try:
             # Redis 承载限流和取消信号，必须参与就绪检查。
-            _state_store.get_json("readyz")
+            get_app_state_store().get_json("readyz")
             dependencies["redis"] = "ok"
         except redis.RedisError:
             dependencies["redis"] = "failed"
@@ -140,7 +147,7 @@ async def metrics() -> Response:
 @app.post("/confirmations/{token}/confirm")
 async def confirm_tool(token: str, context: RequestContext = _context_dependency) -> dict[str, bool]:
     # 读取确认令牌，但不消费它；真正的工具执行方稍后仍需使用同一令牌。
-    confirmation = _confirmations.get(token)
+    confirmation = get_confirmation_store().get(token)
     if confirmation is None or confirmation.owner_user_id != context.user_id or confirmation.tenant_id != context.tenant_id:
         raise HTTPException(status_code=404, detail="Confirmation not found")
     return {"confirmed": True}
@@ -149,7 +156,7 @@ async def confirm_tool(token: str, context: RequestContext = _context_dependency
 @app.post("/confirmations/{token}/reject")
 async def reject_tool(token: str, context: RequestContext = _context_dependency) -> dict[str, bool]:
     # 拒绝时立即消费令牌，防止令牌被重复确认。
-    confirmation = _confirmations.consume(token)
+    confirmation = get_confirmation_store().consume(token)
     if confirmation is None or confirmation.owner_user_id != context.user_id or confirmation.tenant_id != context.tenant_id:
         raise HTTPException(status_code=404, detail="Confirmation not found")
     return {"rejected": True}
@@ -206,15 +213,6 @@ async def create_async_run(
         _rate_limiter.allow_run(context.user_id, context.tenant_id)
     except QuotaExceededError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
-    slot_id = None
-    try:
-        _rate_limiter.check_usage(context.user_id, context.tenant_id)
-        slot_id = _rate_limiter.allow_run(context.user_id, context.tenant_id)
-    except QuotaExceededError as exc:
-        raise HTTPException(status_code=429, detail=str(exc)) from exc
-    finally:
-        if slot_id:
-            _rate_limiter.release_run_slot(slot_id, context.user_id, context.tenant_id)
     provenance = await _jobs.default_provenance()
     if _pg_store:
         run_id = str(uuid.uuid4())
@@ -250,7 +248,7 @@ async def cancel_run(run_id: str, context: RequestContext = _context_dependency)
         raise HTTPException(status_code=404, detail="Run not found")
     if run["status"] not in ("queued", "running"):
         raise HTTPException(status_code=409, detail="Run is not cancelable")
-    _state_store.set_json(f"cancel:{run_id}", True, ttl_seconds=3600)
+    get_app_state_store().set_json(f"cancel:{run_id}", True, ttl_seconds=3600)
     if _pg_store:
         await _pg_store.update_run(run_id, context.user_id, context.tenant_id, "canceled")
     else:

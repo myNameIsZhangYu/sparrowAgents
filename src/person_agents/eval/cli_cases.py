@@ -39,9 +39,9 @@ async def run_cli_workflow_eval(workspace: Path) -> dict[str, Any]:
     register_default_tools(registry, workspace_root=workspace)
     tool_def = registry.get(plan[0]["tool"])
     confirmation = ConfirmationStore(InMemoryStateStore()).create("local", "default", "filesystem", plan[0]["arguments"])
-    from person_agents.middleware import _confirmations
+    from person_agents.middleware import get_confirmation_store
 
-    _confirmations.state_store.store_confirmation(confirmation, 300)
+    get_confirmation_store().state_store.store_confirmation(confirmation, 300)
     confirmed_result = await governed_tool_call(
         plan[0]["tool"],
         plan[0]["arguments"],

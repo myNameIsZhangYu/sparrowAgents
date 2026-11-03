@@ -3,7 +3,7 @@ import hashlib
 import httpx
 
 from person_agents.api.app import app
-from person_agents.middleware import _confirmations
+from person_agents.middleware import get_confirmation_store
 
 
 async def api_client(monkeypatch):
@@ -68,7 +68,7 @@ async def test_confirmation_endpoints(monkeypatch) -> None:
     async with await api_client(monkeypatch) as api:
         digest = hashlib.sha256(b"test-key").hexdigest()
         context_user = f"user_{digest[:24]}"
-        confirmation = _confirmations.create(context_user, "default", "filesystem", {"operation": "write"})
+        confirmation = get_confirmation_store().create(context_user, "default", "filesystem", {"operation": "write"})
         confirm = await api.post(f"/confirmations/{confirmation.token}/confirm", headers={"X-API-Key": "test-key"})
         assert confirm.status_code == 200
         reject = await api.post(f"/confirmations/{confirmation.token}/reject", headers={"X-API-Key": "test-key"})

@@ -1,7 +1,11 @@
 import asyncio
 
+import pytest
+
 from person_agents.config.settings import settings
+from person_agents.governance.rate_limiter import QuotaExceededError
 from person_agents.memory.postgres_store import PostgresStore
+from person_agents.runtime.state import InMemoryStateStore
 from person_agents.runtime.worker import run_one
 
 
@@ -52,3 +56,21 @@ async def test_canceled_run_failure_is_not_retried(monkeypatch):
 
     assert store.runs["run"]["status"] == "canceled"
     assert "retry_at" not in store.runs["run"]
+
+
+async def test_run_uses_concurrent_slot_while_running_and_releases_on_failure(monkeypatch):
+    from person_agents.governance.rate_limiter import RateLimiter
+
+    limiter = RateLimiter(InMemoryStateStore(), max_running_runs=1, daily_run_limit=2)
+    monkeypatch.setattr("person_agents.runtime.worker.RateLimiter", lambda *args, **kwargs: limiter)
+
+    async def graph(*args, **kwargs):
+        with pytest.raises(QuotaExceededError, match="Concurrent"):
+            limiter.allow_run("user", "tenant")
+        return {}
+
+    monkeypatch.setattr("person_agents.graph.engine.run_graph", graph)
+    store = FakePostgresStore()
+    job = {"run_id": "run", "owner_user_id": "user", "tenant_id": "tenant", "session_id": "session", "prompt": "prompt", "attempts": 1}
+
+    await run_one(job, store)

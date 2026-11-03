@@ -12,9 +12,9 @@ class GraphServices:
 
     @property
     def confirmation_store(self) -> Any:
-        from person_agents.middleware import _confirmations
+        from person_agents.middleware import get_confirmation_store
 
-        return _confirmations
+        return get_confirmation_store()
 
     @classmethod
     def default(cls, workspace_root: str | Path | None = None) -> "GraphServices":

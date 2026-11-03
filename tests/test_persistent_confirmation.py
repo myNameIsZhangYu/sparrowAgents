@@ -52,7 +52,7 @@ async def test_confirmation_rejects_cross_owner(tmp_path, monkeypatch):
 
     store = ConfirmationStore(SQLiteStateStore(tmp_path / "state.db"))
     store.create("owner", "tenant", "filesystem", {"operation": "read", "path": "a.txt"})
-    monkeypatch.setattr("person_agents.graph.tool_confirmation._confirmations", store)
+    monkeypatch.setattr("person_agents.middleware._confirmations", store)
 
     confirmation = store.create("owner", "tenant", "filesystem", {"operation": "read", "path": "a.txt"})
     try:

@@ -2,7 +2,7 @@ from typing import Any
 
 from person_agents.graph.engine import run_graph
 from person_agents.graph.runtime import GraphServices
-from person_agents.middleware import _confirmations, governed_tool_call
+from person_agents.middleware import get_confirmation_store, governed_tool_call
 from person_agents.security.context import RequestContext
 
 
@@ -16,7 +16,7 @@ async def confirm_pending_tool(
     session_id: str | None = None,
 ) -> Any:
 
-    confirmation = _confirmations.get(confirmation_token)
+    confirmation = get_confirmation_store().get(confirmation_token)
     if confirmation is None:
         raise PermissionError("Invalid or expired confirmation")
     if confirmation.owner_user_id != context.user_id or confirmation.tenant_id != context.tenant_id:

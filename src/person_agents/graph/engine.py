@@ -7,6 +7,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from person_agents.config.settings import settings
+from person_agents.governance.policy import PolicyEngine
 from person_agents.graph.edges import (
     route_after_critic,
     route_after_executor,
@@ -20,7 +21,6 @@ from person_agents.graph.nodes import (
     intent_node,
     memory_write_node,
     planner_node,
-    run_tool_step,
 )
 from person_agents.graph.state import AgentState
 from person_agents.graph.task_graph import (
@@ -28,6 +28,7 @@ from person_agents.graph.task_graph import (
     normalize_plan_to_task_graph,
 )
 from person_agents.llm.fallback import llm_is_available
+from person_agents.middleware import governed_tool_call
 from person_agents.observability.metrics import agent_run_duration_seconds, agent_runs_total
 from person_agents.security.context import RequestContext
 
@@ -115,7 +116,33 @@ async def tool_specialist(state: AgentState, registry: Any | None = None, servic
         resolved_registry = _get_registry()
     step = state["plan"][state["current_step"]]
     tool = step.get("tool", "none")
-    tool_result = await run_tool_step(step, state, resolved_registry, services=services)
+    tool_def = resolved_registry.get(tool) if resolved_registry else None
+    if not tool_def:
+        tool_result = {"output": f"Unknown tool: {tool}", "degraded": True, "error": f"Unknown tool: {tool}"}
+    else:
+        context = RequestContext(
+            user_id=state.get("owner_user_id", state.get("session_id", "local")),
+            tenant_id=state.get("tenant_id", "default"),
+            session_id=state.get("session_id", "cli"),
+        )
+        result = await governed_tool_call(
+            tool,
+            step.get("arguments") or {},
+            tool_def.handler,
+            context=context,
+            tool_schema=tool_def.parameters,
+            requires_confirmation=tool_def.requires_confirm,
+        )
+        output = result if isinstance(result, dict) and result.get("status") == "confirmation_required" else str(result)
+        degraded = False
+        error = None
+        if not isinstance(output, dict):
+            output_allowed, governed_output = PolicyEngine().sanitize_tool_output(output)
+            if not output_allowed:
+                output = governed_output
+                degraded = True
+                error = governed_output
+        tool_result = {"output": output, "degraded": degraded, "error": error}
     output = tool_result["output"]
     degraded = tool_result["degraded"]
     error = tool_result["error"]

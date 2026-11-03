@@ -2,6 +2,7 @@ import json
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -180,6 +181,7 @@ class SQLiteStateStore:
 
     def __init__(self, db_path: Any):
         self.db_path = db_path
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS state_json (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at REAL)"
