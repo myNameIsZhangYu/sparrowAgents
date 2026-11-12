@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     prompt_version: str = "default-v1"
     tool_config_version: str = "default-v1"
     policy_version: str = "default-v1"
+    mcp_server_url: str = ""
+    mcp_server_token: str = ""
+    mcp_timeout_s: float = 10.0
     nextauth_secret: str = ""
     salt: str = ""
     encryption_key: str = ""

@@ -47,6 +47,34 @@ CREATE TABLE IF NOT EXISTS runs (
 );
     """,
     "CREATE INDEX IF NOT EXISTS idx_runs_owner_pg ON runs(tenant_id, owner_user_id, status)",
+    """
+CREATE TABLE IF NOT EXISTS task_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(run_id, task_id)
+);
+    """,
+    """
+CREATE TABLE IF NOT EXISTS task_artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    artifact_type TEXT NOT NULL,
+    uri TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_task_artifacts_run_pg ON task_artifacts(run_id, task_id)",
 )
 
 
@@ -159,6 +187,119 @@ class PostgresStore:
                 ),
                 {"key": key, "value": value, "category": category, "owner_user_id": owner_user_id, "tenant_id": tenant_id},
             )
+
+    async def upsert_task_checkpoint(
+        self,
+        checkpoint_id: str,
+        run_id: str,
+        owner_user_id: str,
+        tenant_id: str,
+        task_id: str,
+        status: str,
+        state: dict[str, Any],
+    ) -> None:
+        import json
+
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """INSERT INTO task_checkpoints (checkpoint_id,run_id,tenant_id,owner_user_id,task_id,status,state_json)
+                        VALUES (:checkpoint_id,:run_id,:tenant_id,:owner_user_id,:task_id,:status,:state_json)
+                        ON CONFLICT (run_id, task_id) DO UPDATE SET
+                            checkpoint_id=EXCLUDED.checkpoint_id,status=EXCLUDED.status,state_json=EXCLUDED.state_json,updated_at=now()"""
+                ),
+                {
+                    "checkpoint_id": checkpoint_id,
+                    "run_id": run_id,
+                    "tenant_id": tenant_id,
+                    "owner_user_id": owner_user_id,
+                    "task_id": task_id,
+                    "status": status,
+                    "state_json": json.dumps(state, ensure_ascii=False),
+                },
+            )
+
+    async def get_task_checkpoint(
+        self,
+        run_id: str,
+        owner_user_id: str,
+        tenant_id: str,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        import json
+
+        async with self.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT checkpoint_id,run_id,task_id,status,state_json FROM task_checkpoints "
+                        "WHERE run_id=:run_id AND owner_user_id=:owner_user_id AND tenant_id=:tenant_id AND task_id=:task_id"
+                    ),
+                    {
+                        "run_id": run_id,
+                        "owner_user_id": owner_user_id,
+                        "tenant_id": tenant_id,
+                        "task_id": task_id,
+                    },
+                )
+            ).mappings().first()
+            if row is None:
+                return None
+            checkpoint = dict(row)
+            checkpoint["state"] = json.loads(checkpoint.pop("state_json"))
+            return checkpoint
+
+    async def record_task_artifact(
+        self,
+        artifact_id: str,
+        run_id: str,
+        owner_user_id: str,
+        tenant_id: str,
+        task_id: str,
+        artifact_type: str,
+        uri: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        import json
+
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """INSERT INTO task_artifacts
+                        (artifact_id,run_id,tenant_id,owner_user_id,task_id,artifact_type,uri,metadata_json)
+                        VALUES (:artifact_id,:run_id,:tenant_id,:owner_user_id,:task_id,:artifact_type,:uri,:metadata_json)"""
+                ),
+                {
+                    "artifact_id": artifact_id,
+                    "run_id": run_id,
+                    "tenant_id": tenant_id,
+                    "owner_user_id": owner_user_id,
+                    "task_id": task_id,
+                    "artifact_type": artifact_type,
+                    "uri": uri,
+                    "metadata_json": json.dumps(metadata, ensure_ascii=False),
+                },
+            )
+
+    async def list_task_artifacts(self, run_id: str, owner_user_id: str, tenant_id: str) -> list[dict[str, Any]]:
+        import json
+
+        async with self.engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT artifact_id,run_id,task_id,artifact_type,uri,metadata_json FROM task_artifacts "
+                        "WHERE run_id=:run_id AND owner_user_id=:owner_user_id AND tenant_id=:tenant_id ORDER BY created_at"
+                    ),
+                    {"run_id": run_id, "owner_user_id": owner_user_id, "tenant_id": tenant_id},
+                )
+            ).mappings().all()
+            artifacts = []
+            for row in rows:
+                artifact = dict(row)
+                artifact["metadata"] = json.loads(artifact.pop("metadata_json"))
+                artifacts.append(artifact)
+            return artifacts
 
     async def depth(self, status: str) -> int:
         async with self.engine.connect() as conn:

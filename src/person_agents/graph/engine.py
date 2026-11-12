@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 
 from person_agents.config.settings import settings
 from person_agents.governance.policy import PolicyEngine
+from person_agents.graph.agent_runtime import AgentRuntimeRegistry
 from person_agents.graph.edges import (
     route_after_critic,
     route_after_executor,
@@ -55,6 +56,10 @@ agent_capabilities.register(
     allowed_tools=["filesystem", "shell"],
     max_concurrency=2,
 )
+agent_runtimes = AgentRuntimeRegistry.legacy({
+    "executor": {"task_types": ["llm"], "allowed_tools": ["none"], "max_concurrency": 4},
+    "tool": {"task_types": ["tool_use"], "allowed_tools": ["filesystem", "shell"], "max_concurrency": 2},
+})
 
 
 def _fast_reply(user_input: str) -> str | None:

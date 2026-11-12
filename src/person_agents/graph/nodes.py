@@ -6,6 +6,7 @@ import structlog
 
 from person_agents.config.settings import settings
 from person_agents.governance.policy import PolicyEngine
+from person_agents.graph.plan_model import PlanModel
 from person_agents.graph.state import AgentState
 from person_agents.graph.task_graph import (
     build_failure_analysis,
@@ -301,7 +302,14 @@ async def planner_node(state: AgentState, registry: ToolRegistry | None = None, 
         parsed_plan = json.loads(planner_output)
     except json.JSONDecodeError:
         parsed_plan = None
-    plan = normalize_planner_plan(parsed_plan, user_input)
+    try:
+        # 先复用旧修复规则保证工具参数安全，再用 PlanModel 统一识别 DAG 与预算。
+        plan = PlanModel.parse(
+            normalize_planner_plan(parsed_plan, user_input),
+            objective=user_input,
+        ).to_legacy()
+    except (TypeError, ValueError):
+        plan = normalize_planner_plan(parsed_plan, user_input)
     output = {"plan": plan, "current_step": 0}
     trace_graph_node(state.get("session_id", "agent"), "planner", {"input": user_input}, output, int((time.monotonic() - started) * 1000))
     return output

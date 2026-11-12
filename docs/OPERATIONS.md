@@ -64,6 +64,13 @@ curl -fsS http://localhost:8000/readyz
 
 ## Incident response
 
+### Super Agent incident checks
+
+1. 确认 MCP server 是否可达；不可达时工具同步会安全降级为本地工具。
+2. 检查 `task_checkpoints` 是否保留失败子任务状态，恢复前不要删除。
+3. 检查 `task_artifacts` 的 URI 与 metadata，确认产物归属 run/task。
+4. 审计日志中出现安全事件时暂停发布，并复核质量门报告。
+
 - Queue depth growing: inspect worker logs and PostgreSQL locks.
 - Dead letter increasing: inspect `runs.error`, fix the root cause, requeue manually after approval.
 - Redis unavailable: requests fail closed; restore Redis before accepting runs.

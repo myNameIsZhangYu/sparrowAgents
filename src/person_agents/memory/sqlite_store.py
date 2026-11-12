@@ -82,6 +82,30 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     PRIMARY KEY (session_id, owner_user_id, tenant_id)
 );
+CREATE TABLE IF NOT EXISTS task_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(run_id, task_id)
+);
+CREATE TABLE IF NOT EXISTS task_artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    artifact_type TEXT NOT NULL,
+    uri TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_artifacts_run ON task_artifacts(run_id, task_id);
 """
 
 MIGRATIONS = [
@@ -369,6 +393,76 @@ class SQLiteStore:
         )
         conn.commit()
         return cursor.rowcount > 0
+
+    def upsert_task_checkpoint(
+        self,
+        checkpoint_id: str,
+        run_id: str,
+        owner_user_id: str,
+        tenant_id: str,
+        task_id: str,
+        status: str,
+        state: dict[str, Any],
+    ) -> None:
+        conn = self.connect()
+        conn.execute(
+            """INSERT INTO task_checkpoints (checkpoint_id,run_id,tenant_id,owner_user_id,task_id,status,state_json)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(run_id, task_id) DO UPDATE SET
+                    checkpoint_id=excluded.checkpoint_id,status=excluded.status,state_json=excluded.state_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')""",
+            (checkpoint_id, run_id, tenant_id, owner_user_id, task_id, status, json.dumps(state, ensure_ascii=False)),
+        )
+        conn.commit()
+
+    def get_task_checkpoint(self, run_id: str, owner_user_id: str, tenant_id: str, task_id: str) -> dict[str, Any] | None:
+        conn = self.connect()
+        row = conn.execute(
+            "SELECT checkpoint_id,run_id,task_id,status,state_json FROM task_checkpoints WHERE run_id=? AND owner_user_id=? AND tenant_id=?",
+            (run_id, owner_user_id, tenant_id),
+        ).fetchone()
+        if row is None:
+            return None
+        checkpoint_id, stored_run_id, stored_task_id, status, state_json = row
+        return {
+            "checkpoint_id": checkpoint_id,
+            "run_id": stored_run_id,
+            "task_id": stored_task_id,
+            "status": status,
+            "state": json.loads(state_json),
+        }
+
+    def record_task_artifact(
+        self,
+        artifact_id: str,
+        run_id: str,
+        owner_user_id: str,
+        tenant_id: str,
+        task_id: str,
+        artifact_type: str,
+        uri: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        conn = self.connect()
+        conn.execute(
+            "INSERT INTO task_artifacts (artifact_id,run_id,tenant_id,owner_user_id,task_id,artifact_type,uri,metadata_json) VALUES (?,?,?,?,?,?,?,?)",
+            (artifact_id, run_id, tenant_id, owner_user_id, task_id, artifact_type, uri, json.dumps(metadata, ensure_ascii=False)),
+        )
+        conn.commit()
+
+    def list_task_artifacts(self, run_id: str, owner_user_id: str, tenant_id: str) -> list[dict[str, Any]]:
+        conn = self.connect()
+        rows = conn.execute(
+            "SELECT artifact_id,run_id,task_id,artifact_type,uri,metadata_json FROM task_artifacts WHERE run_id=? AND owner_user_id=? AND tenant_id=? ORDER BY created_at",
+            (run_id, owner_user_id, tenant_id),
+        ).fetchall()
+        return [{
+            "artifact_id": artifact_id,
+            "run_id": stored_run_id,
+            "task_id": stored_task_id,
+            "artifact_type": artifact_type,
+            "uri": uri,
+            "metadata": json.loads(metadata_json),
+        } for artifact_id, stored_run_id, stored_task_id, artifact_type, uri, metadata_json in rows]
 
     def queue_depth(self) -> int:
         return int(self.connect().execute("SELECT count(*) FROM runs WHERE status='queued'").fetchone()[0])

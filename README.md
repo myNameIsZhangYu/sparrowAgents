@@ -86,7 +86,16 @@
 
 - **filesystem**：沙箱内读/写/列/删（路径逃逸保护）
 - **Docker sandbox**：一次性容器执行 shell，限制网络/CPU/内存
+- **HTTP MCP**：配置 `PERSON_AGENTS_MCP_SERVER_URL` 后自动同步远程工具；调用仍经过限流、schema 校验、权限、确认与审计
 - 所有工具调用经过权限策略校验和审计日志
+
+### Super Agent 能力
+
+- `PlanModel` 支持目标、里程碑、预算、风险、超时和依赖 DAG，并兼容旧 planner 输出
+- `AgentRuntimeRegistry` 支持 persona、技能、工具权限、记忆作用域、并发上限和可序列化配置
+- SQLite 与 PostgreSQL 均提供子任务 checkpoint 与 task artifact 存储接口
+- `SkillStore` 提供技能 JSON Schema 校验、版本化、读取、列表与搜索
+- `evaluate_super_agent_report` 聚合通过率、重试率、恢复率、安全事件、token、成本、延迟和综合质量门
 
 ### 治理（Governance）
 
@@ -103,6 +112,16 @@
 - **Langfuse**（自托管 Docker）: 记录每次 LLM 调用的 input/output/token/延迟/降级状态，并按 `intent` / `planner` / `executor` / `critic` 生成嵌套节点 span
 - **structlog**: 结构化 JSON 日志，支持 console/JSON 切换
 - **CostTracker**: 按 session 追踪 token 消耗和调用次数
+
+## Super Agent 验收清单
+
+1. `uv run pytest -q`
+2. `uv run ruff check src tests`
+3. 配置 `PERSON_AGENTS_MCP_SERVER_URL` 后，`readyz` 服务启动时能同步远程工具；无配置时保持本地工具可用
+4. 复杂计划输出依赖 DAG，确认、失败重试和 critic 路径不受破坏
+5. 长任务失败后可通过 checkpoint state 恢复，完成产物可按 run/task 追溯
+6. 技能文件通过 schema 校验、版本唯一，且可按名称/描述检索
+7. 评估报告中安全事件必须为 0，质量门低于阈值时禁止发布
 
 ## 快速开始
 
