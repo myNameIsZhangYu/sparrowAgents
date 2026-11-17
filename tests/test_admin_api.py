@@ -22,6 +22,11 @@ async def test_admin_credential_lifecycle(monkeypatch, tmp_path) -> None:
         assert created.status_code == 201
         assert created.json()["plaintext"].startswith("pa_")
 
+        from person_agents.security.auth import resolve_request_context
+
+        context = await resolve_request_context(created.json()["plaintext"])
+        assert context.user_id == "user-a"
+
         rotated = await api.post(
             "/admin/credentials/rotate",
             json={"key_id": created.json()["key_id"]},

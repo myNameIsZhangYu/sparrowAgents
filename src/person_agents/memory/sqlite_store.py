@@ -431,6 +431,22 @@ class SQLiteStore:
             "state": json.loads(state_json),
         }
 
+    def list_task_checkpoints(self, run_id: str, owner_user_id: str, tenant_id: str) -> list[dict[str, Any]]:
+        rows = self.connect().execute(
+            "SELECT checkpoint_id,run_id,task_id,status,state_json FROM task_checkpoints WHERE run_id=? AND owner_user_id=? AND tenant_id=?",
+            (run_id, owner_user_id, tenant_id),
+        ).fetchall()
+        return [
+            {
+                "checkpoint_id": checkpoint_id,
+                "run_id": stored_run_id,
+                "task_id": task_id,
+                "status": status,
+                "state": json.loads(state_json),
+            }
+            for checkpoint_id, stored_run_id, task_id, status, state_json in rows
+        ]
+
     def record_task_artifact(
         self,
         artifact_id: str,

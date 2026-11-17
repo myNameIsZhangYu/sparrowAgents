@@ -27,6 +27,22 @@ def test_super_agent_metrics_aggregates_all_gates():
     assert metrics["quality_gate_passed"] is False
 
 
+def test_super_agent_metrics_aggregates_runtime_quality():
+    report = {
+        "threshold": 0.8,
+        "results": [
+            {"passed": True, "budget_adhered": True, "repair_success": True, "verified_subtasks": 3, "subtasks": 3},
+            {"passed": True, "budget_adhered": False, "repair_success": False, "verified_subtasks": 1, "subtasks": 2},
+        ],
+    }
+
+    metrics = evaluate_super_agent_report(report)
+
+    assert metrics["budget_adherence"] == 0.5
+    assert metrics["repair_success_rate"] == 0.5
+    assert metrics["verification_evidence_rate"] == 0.8
+
+
 def test_super_agent_metrics_passes_clean_report():
     report = {
         "threshold": 0.8,

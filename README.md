@@ -92,6 +92,10 @@
 ### Super Agent 能力
 
 - `PlanModel` 支持目标、里程碑、预算、风险、超时和依赖 DAG，并兼容旧 planner 输出
+- Planner 会检索匹配技能并注入候选执行片段；成功工具链可沉淀为版本化技能
+- Executor 写入子任务 checkpoint，失败重试时恢复已完成子任务并保留验证证据
+- Critic 结合结构化失败分类、修复上限和预算硬限制决定 retry / fail
+- 评估报告纳入预算遵守、修复成功率与验证证据覆盖率
 - `AgentRuntimeRegistry` 支持 persona、技能、工具权限、记忆作用域、并发上限和可序列化配置
 - SQLite 与 PostgreSQL 均提供子任务 checkpoint 与 task artifact 存储接口
 - `SkillStore` 提供技能 JSON Schema 校验、版本化、读取、列表与搜索
@@ -122,6 +126,8 @@
 5. 长任务失败后可通过 checkpoint state 恢复，完成产物可按 run/task 追溯
 6. 技能文件通过 schema 校验、版本唯一，且可按名称/描述检索
 7. 评估报告中安全事件必须为 0，质量门低于阈值时禁止发布
+8. 结构化修复在达到上限后必须 abandon，不再盲目重试
+9. 预算耗尽时必须禁止 retry，并保留失败归因
 
 ## 快速开始
 

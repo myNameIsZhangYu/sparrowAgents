@@ -41,7 +41,7 @@ app.include_router(web_router)
 async def current_context(x_api_key: str | None = Header(default=None)) -> RequestContext:
     try:
         # 将 API Key 解析成租户、用户、角色和会话上下文。
-        return resolve_request_context(x_api_key)
+        return await resolve_request_context(x_api_key)
     except SecurityError as exc:
         # 认证失败统一转换为 401，避免泄露内部凭证错误细节。
         raise HTTPException(status_code=401, detail=str(exc)) from exc
@@ -210,7 +210,7 @@ async def create_async_run(
     session_id = request.session_id or context.session_id
     try:
         _rate_limiter.check_usage(context.user_id, context.tenant_id)
-        _rate_limiter.allow_run(context.user_id, context.tenant_id)
+        slot_id = _rate_limiter.allow_run(context.user_id, context.tenant_id)
     except QuotaExceededError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     provenance = await _jobs.default_provenance()
@@ -219,6 +219,11 @@ async def create_async_run(
         await _pg_store.create_run(run_id, request.prompt, context.user_id, context.tenant_id, session_id, provenance=provenance)
     else:
         run_id = _jobs.create(request.prompt, context.user_id, context.tenant_id, session_id, provenance)
+    get_app_state_store().set_json(
+        f"run_slot_id:{run_id}",
+        {"slot_id": slot_id, "owner_user_id": context.user_id, "tenant_id": context.tenant_id},
+        ttl_seconds=settings.run_timeout_s * 2,
+    )
     return RunAcceptedResponse(run_id=run_id, status="queued", session_id=session_id)
 
 
@@ -228,6 +233,7 @@ async def get_run(run_id: str, context: RequestContext = _context_dependency) ->
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return RunResponse(
+        run_id=run_id,
         session_id=run["session_id"],
         status=run["status"],
         output=run["output"],
@@ -253,4 +259,8 @@ async def cancel_run(run_id: str, context: RequestContext = _context_dependency)
         await _pg_store.update_run(run_id, context.user_id, context.tenant_id, "canceled")
     else:
         _jobs.update(run_id, context.user_id, context.tenant_id, "canceled")
-    return RunResponse(session_id=run["session_id"], status="canceled")
+    slot_info = get_app_state_store().get_json(f"run_slot_id:{run_id}")
+    if slot_info:
+        _rate_limiter.release_run_slot(slot_info["slot_id"], slot_info["owner_user_id"], slot_info["tenant_id"])
+        get_app_state_store().delete(f"run_slot_id:{run_id}")
+    return RunResponse(run_id=run_id, session_id=run["session_id"], status="canceled")

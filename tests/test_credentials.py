@@ -27,7 +27,7 @@ def test_credential_lifecycle(tmp_path: Path, monkeypatch) -> None:
     assert manager.verify(rotated[1]) is None
 
 
-def test_registry_identity_and_legacy_fallback(tmp_path: Path, monkeypatch) -> None:
+async def test_registry_identity_and_legacy_fallback(tmp_path: Path, monkeypatch) -> None:
     import hashlib
 
 
@@ -46,7 +46,7 @@ def test_registry_identity_and_legacy_fallback(tmp_path: Path, monkeypatch) -> N
         "person_agents.security.auth.CredentialManager",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
     )
-    context = resolve_request_context("legacy")
+    context = await resolve_request_context("legacy")
     assert context.user_id.startswith("user_")
     with pytest.raises(SecurityError):
-        resolve_request_context("bad")
+        await resolve_request_context("bad")

@@ -2,8 +2,11 @@ import hashlib
 import sqlite3
 import uuid
 
+import sqlalchemy.exc
+
 from person_agents.config.settings import settings
 from person_agents.security.context import RequestContext
+from person_agents.security.credential_store import PostgresCredentialStore
 from person_agents.security.credentials import CredentialManager
 
 
@@ -16,9 +19,20 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def resolve_request_context(api_key: str | None) -> RequestContext:
+async def resolve_request_context(api_key: str | None) -> RequestContext:
     if not api_key:
         raise SecurityError("API key is required")
+    if settings.postgres_dsn:
+        try:
+            credential = await PostgresCredentialStore().verify(api_key)
+        except (RuntimeError, OSError, sqlalchemy.exc.SQLAlchemyError):
+            credential = None
+        if credential:
+            return RequestContext(
+                user_id=credential.user_id,
+                tenant_id=credential.tenant_id,
+                session_id=f"session_{uuid.uuid4().hex}",
+            )
     try:
         # 优先查凭证库；存储故障时不泄露异常，只回退到静态 key。
         credential = CredentialManager(settings.sqlite_path.parent / "credentials.db").verify(api_key)

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from typing import Any
@@ -6,7 +7,9 @@ import structlog
 
 from person_agents.config.settings import settings
 from person_agents.governance.policy import PolicyEngine
+from person_agents.graph.budget import BudgetController
 from person_agents.graph.plan_model import PlanModel
+from person_agents.graph.replanner import choose_repair_action
 from person_agents.graph.state import AgentState
 from person_agents.graph.task_graph import (
     build_failure_analysis,
@@ -27,6 +30,7 @@ from person_agents.observability.metrics import (
     agent_run_duration_seconds,
     agent_runs_total,
 )
+from person_agents.runtime.worker import restore_completed_subtasks
 from person_agents.security.context import RequestContext
 from person_agents.tools.registry import ToolRegistry, register_default_tools
 
@@ -261,6 +265,12 @@ async def planner_node(state: AgentState, registry: ToolRegistry | None = None, 
         session_summary,
     )
     resolved_registry = registry or (services.registry if services else None)
+    skill_store = getattr(services, "skill_store", None)
+    matching_skills = skill_store.search_ranked(user_input) if skill_store else []
+    skills_context = "\n".join(
+        f"- {skill['name']} v{skill['version']}: {skill['description']}\n  plan: {json.dumps(skill.get('plan', []), ensure_ascii=False)}"
+        for skill in matching_skills
+    )
     tools = [
         {
             "name": tool.name,
@@ -280,6 +290,8 @@ async def planner_node(state: AgentState, registry: ToolRegistry | None = None, 
                 "Every non-first step must declare 'depends_on' unless it can safely run in parallel. "
                 "Use 'none' only for direct LLM actions. "
                 f"Session context: {planner_context}\n"
+                + (f"Matching skills:\n{skills_context}\n" if matching_skills else "")
+                +
                 f"Available tools: {tools}"
             ),
         },
@@ -326,6 +338,15 @@ async def executor_node(state: AgentState, services: Any | None = None) -> dict[
     plan = state.get("plan", [])
     if len(plan) > 1:
         subtasks = state.get("subtasks") or normalize_plan_to_task_graph(plan, state["messages"][-1]["content"])
+        store = getattr(services, "store", None)
+        if state.get("run_id") and store is not None and hasattr(store, "list_task_checkpoints"):
+            subtasks = restore_completed_subtasks(
+                subtasks,
+                store,
+                state["run_id"],
+                state.get("owner_user_id", "local"),
+                state.get("tenant_id", "default"),
+            )
         if any(task.get("status") == "failed" for task in subtasks):
             retried = retry_failed_subtasks(subtasks)
             retried_by_id = {task["id"]: task for task in retried}
@@ -346,6 +367,7 @@ async def executor_node(state: AgentState, services: Any | None = None) -> dict[
                     "status": result_status,
                     "degraded": tool_result.get("degraded", False),
                     "error": tool_result.get("error"),
+                    "verification": {"passed": result_status == "completed"},
                 }
             else:
                 async def _llm(messages):
@@ -359,7 +381,7 @@ async def executor_node(state: AgentState, services: Any | None = None) -> dict[
                     {"role": "user", "content": subtask["action"]},
                 ], _llm, graph_context)
                 output = resp.content
-            return {"output": output}
+            return {"output": output, "verification": {"passed": True}}
 
         execution_tasks = [task for task in subtasks if task.get("status") != "completed"]
         task_results = await execute_task_graph(execution_tasks, run_subtask)
@@ -387,6 +409,22 @@ async def executor_node(state: AgentState, services: Any | None = None) -> dict[
         result_status = {result["subtask_id"]: result["status"] for result in task_results}
         for subtask in subtasks:
             subtask["status"] = result_status.get(subtask["id"], subtask.get("status", "pending"))
+        if state.get("run_id") and store is not None and hasattr(store, "upsert_task_checkpoint"):
+            for result in task_results:
+                if result.get("status") != "completed" or not result.get("verification", {}).get("passed"):
+                    continue
+                checkpoint_state = {"output": result.get("output"), "verification": result.get("verification")}
+                checkpoint = store.upsert_task_checkpoint(
+                    f"{state['run_id']}:{result['subtask_id']}",
+                    state["run_id"],
+                    state.get("owner_user_id", "local"),
+                    state.get("tenant_id", "default"),
+                    result["subtask_id"],
+                    "completed",
+                    checkpoint_state,
+                )
+                if asyncio.iscoroutine(checkpoint):
+                    await checkpoint
         trace_graph_node(
             state.get("session_id", "agent"),
             "executor",
@@ -563,6 +601,47 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
         agent_runs_total.labels(agent="critic", status="success").inc()
         agent_run_duration_seconds.labels(agent="critic").observe(time.monotonic() - started)
         return output
+
+    budget = BudgetController(
+        max_tokens=state.get("budget_max_tokens"),
+        max_cost_usd=state.get("budget_max_cost_usd"),
+        max_seconds=settings.loop_guard_seconds,
+    )
+    budget.consume(
+        tokens=state.get("total_tokens", 0),
+        cost_usd=state.get("total_cost_usd", 0.0),
+    )
+    if budget.exhausted():
+        output = {
+            "critic_feedback": "fail",
+            "status": "failed",
+            "degraded": True,
+            "error": budget.critic_feedback,
+            "retry_count": retry_count,
+            "failed_subtask_ids": failed_subtask_ids,
+            "failure_analysis": structured_failures,
+            "recovery_strategy": "none",
+        }
+        trace_graph_node(state.get("session_id", "agent"), "critic", {"budget": "exhausted"}, output, int((time.monotonic() - started) * 1000))
+        agent_loop_breaks_total.labels("budget").inc()
+        return output
+
+    repair_decisions = [
+        {**failure, **choose_repair_action(failure["failure_type"], attempt=retry_count)}
+        for failure in structured_failures
+    ]
+    if any(decision["action"] == "abandon" for decision in repair_decisions):
+        output = {
+            "critic_feedback": "fail",
+            "status": "failed",
+            "retry_count": retry_count,
+            "failed_subtask_ids": failed_subtask_ids,
+            "failure_analysis": structured_failures,
+            "recovery_strategy": "none",
+            "repair_decisions": repair_decisions,
+        }
+        trace_graph_node(state.get("session_id", "agent"), "critic", {"repair": "abandoned"}, output, int((time.monotonic() - started) * 1000))
+        return output
     async def _llm(messages):
         return await call_with_fallback(messages)
 
@@ -595,7 +674,8 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
         "retry_count": retry_count + 1,
         "failed_subtask_ids": failed_subtask_ids,
         "failure_analysis": structured_failures,
-        "recovery_strategy": "retry_failed_subtasks" if failed_subtask_ids else "none",
+        "recovery_strategy": "structured_repair" if failed_subtask_ids else "none",
+        "repair_decisions": repair_decisions,
     }
     trace_graph_node(state.get("session_id", "agent"), "critic", {"results": str(results_summary)}, output, int((time.monotonic() - started) * 1000))
     agent_runs_total.labels(agent="critic", status="success").inc()

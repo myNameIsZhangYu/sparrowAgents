@@ -58,6 +58,34 @@ async def test_canceled_run_failure_is_not_retried(monkeypatch):
     assert "retry_at" not in store.runs["run"]
 
 
+async def test_canceled_run_releases_slot_and_cancel_marker(monkeypatch):
+    from person_agents.governance.rate_limiter import RateLimiter
+
+    state_store = InMemoryStateStore()
+    limiter = RateLimiter(state_store, max_running_runs=1, daily_run_limit=2)
+    monkeypatch.setattr("person_agents.runtime.worker.RateLimiter", lambda *args, **kwargs: limiter)
+    monkeypatch.setattr("person_agents.runtime.worker.create_state_store", lambda redis_url: state_store)
+
+    async def graph(*args, **kwargs):
+        raise RuntimeError("graph failed after cancel")
+
+    monkeypatch.setattr("person_agents.graph.engine.run_graph", graph)
+    store = FakePostgresStore()
+    store.runs["run"] = {"status": "canceled"}
+    job = {"run_id": "run", "owner_user_id": "user", "tenant_id": "tenant", "session_id": "session", "prompt": "prompt", "attempts": 1}
+    state_store.set_json("cancel:run", True)
+
+    await run_one(job, store)
+
+    assert store.runs["run"]["status"] == "canceled"
+    assert limiter.allow_run("user", "tenant")
+    slot_key = "run_slot:tenant:user"
+    slot_id = next(iter(limiter.state_store.get_json(slot_key)))
+    limiter.release_run_slot(slot_id, "user", "tenant")
+    assert not state_store.get_json(slot_key)
+    assert state_store.get_json("cancel:run") is None
+
+
 async def test_run_uses_concurrent_slot_while_running_and_releases_on_failure(monkeypatch):
     from person_agents.governance.rate_limiter import RateLimiter
 

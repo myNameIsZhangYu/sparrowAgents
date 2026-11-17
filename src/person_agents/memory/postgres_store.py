@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -248,6 +249,25 @@ class PostgresStore:
             checkpoint = dict(row)
             checkpoint["state"] = json.loads(checkpoint.pop("state_json"))
             return checkpoint
+
+    async def list_task_checkpoints(self, run_id: str, owner_user_id: str, tenant_id: str) -> list[dict[str, Any]]:
+        query = text(
+            "SELECT checkpoint_id,run_id,task_id,status,state_json FROM task_checkpoints "
+            "WHERE run_id=:run_id AND owner_user_id=:owner_user_id AND tenant_id=:tenant_id"
+        )
+        async with self.engine.begin() as connection:
+            result = await connection.execute(query, {
+                "run_id": run_id,
+                "owner_user_id": owner_user_id,
+                "tenant_id": tenant_id,
+            })
+            rows = result.mappings().all()
+        checkpoints = []
+        for row in rows:
+            checkpoint = dict(row)
+            checkpoint["state"] = json.loads(checkpoint.pop("state_json"))
+            checkpoints.append(checkpoint)
+        return checkpoints
 
     async def record_task_artifact(
         self,

@@ -17,6 +17,7 @@ class RunRequest(BaseModel):
 
 class RunResponse(BaseModel):
     # confirmation_token 只在需要人工确认时返回。
+    run_id: str | None = None
     session_id: str
     status: str
     output: str | None = None

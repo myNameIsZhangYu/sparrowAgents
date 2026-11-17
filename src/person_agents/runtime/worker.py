@@ -9,6 +9,7 @@ from prometheus_client import Counter
 
 from person_agents.config.settings import settings
 from person_agents.governance.rate_limiter import RateLimiter
+from person_agents.graph.verification import verify_subtask_evidence
 from person_agents.memory.postgres_store import PostgresStore
 from person_agents.runtime.job_store import create_job_store
 from person_agents.runtime.jobs import JobManager
@@ -19,6 +20,22 @@ logger = structlog.get_logger()
 
 run_attempts_total = Counter("run_attempts_total", "Run execution attempts", ["status"])
 run_dead_letter_total = Counter("run_dead_letter_total", "Runs moved to dead letter")
+
+
+def restore_completed_subtasks(subtasks, store, run_id, owner_user_id, tenant_id):
+    if not hasattr(store, "list_task_checkpoints"):
+        return subtasks
+    checkpoints = store.list_task_checkpoints(run_id, owner_user_id, tenant_id)
+    by_task_id = {checkpoint["task_id"]: checkpoint for checkpoint in checkpoints}
+    restored = []
+    for task in subtasks:
+        checkpoint = by_task_id.get(task["id"])
+        checkpoint_state = checkpoint.get("state", {}) if checkpoint else {}
+        if checkpoint and checkpoint.get("status") == "completed" and verify_subtask_evidence(checkpoint_state):
+            restored.append({**task, "status": "completed", "result": checkpoint_state})
+        else:
+            restored.append(task)
+    return restored
 
 
 async def run_one(job: dict, store, worker_id: str = "inline", lease_seconds: int = 60, services: Any | None = None) -> None:
@@ -83,6 +100,7 @@ async def run_one(job: dict, store, worker_id: str = "inline", lease_seconds: in
         attempts = int(job.get("attempts", 1))
         # 读取最新状态，防止“先取消后异常”的竞态被错误重试。
         current_run = await store.get_run(job["run_id"], job["owner_user_id"], job["tenant_id"]) if postgres else manager.get(job["run_id"], job["owner_user_id"], job["tenant_id"])
+        state_store.delete(f"cancel:{job['run_id']}")
         if current_run and current_run.get("status") == "canceled":
             return
         if str(exc) == "Run canceled":
@@ -113,7 +131,7 @@ async def run_one(job: dict, store, worker_id: str = "inline", lease_seconds: in
     finally:
         # 取消轮询任务是本次执行的必须清理项。
         cancellation_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        with contextlib.suppress(asyncio.CancelledError, TimeoutError):
             await cancellation_task
         rate_limiter.release_run_slot(slot_id, job["owner_user_id"], job["tenant_id"])
 

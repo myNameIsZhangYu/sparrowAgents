@@ -18,6 +18,12 @@ def evaluate_super_agent_report(report: dict[str, Any]) -> dict[str, Any]:
     security_penalty = min(security_events * 0.1, 0.5)
     avg_latency_ms = sum(float(r.get("latency_ms", 0)) for r in results) / max(total, 1)
     latency_penalty = min(max((avg_latency_ms - 5_000) / 10_000, 0), 0.2)
+    budget_adherence = sum(bool(r.get("budget_adhered")) for r in results) / max(total, 1)
+    repair_success_rate = sum(bool(r.get("repair_success")) for r in results) / max(total, 1)
+    verification_evidence_rate = (
+        sum(int(r.get("verified_subtasks", 0)) for r in results)
+        / max(sum(int(r.get("subtasks", 0)) for r in results), 1)
+    )
     score = max(0.0, min(1.0, pass_rate - security_penalty - latency_penalty))
 
     return {
@@ -31,6 +37,9 @@ def evaluate_super_agent_report(report: dict[str, Any]) -> dict[str, Any]:
         "total_tokens": sum(int(result.get("tokens", 0)) for result in results),
         "total_cost_usd": sum(float(result.get("cost_usd", 0)) for result in results),
         "dag_completed": all(bool(result.get("dag_completed")) for result in results),
+        "budget_adherence": budget_adherence,
+        "repair_success_rate": repair_success_rate,
+        "verification_evidence_rate": verification_evidence_rate,
         "score": score,
         "quality_gate_passed": score >= float(report.get("threshold", 0.8)) and security_events == 0,
     }

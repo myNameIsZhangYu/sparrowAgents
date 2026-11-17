@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -63,3 +64,55 @@ class SkillStore:
     def search(self, query: str) -> list[dict[str, Any]]:
         needle = query.lower()
         return [skill for skill in self.list() if needle in skill.get("description", "").lower() or needle in skill.get("name", "").lower()]
+
+    def search_ranked(self, query: str, *, limit: int = 3) -> list[dict[str, Any]]:
+        terms = [term for term in re.findall(r"[a-z0-9_]+", query.lower()) if len(term) > 1]
+        if not terms:
+            return []
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for skill in self.list():
+            haystack = " ".join([
+                skill.get("name", ""),
+                skill.get("description", ""),
+                " ".join(skill.get("tools", [])),
+            ]).lower()
+            score = sum(haystack.count(term) for term in set(terms))
+            if score:
+                scored.append((float(score), skill))
+        scored.sort(key=lambda item: (-item[0], item[1]["name"]))
+        return [{**skill, "score": score} for score, skill in scored[:max(1, limit)]]
+
+
+def derive_skill_from_plan(
+    objective: str,
+    plan: list[dict[str, Any]],
+    *,
+    store: SkillStore,
+    version: str = "1.0.0",
+) -> dict[str, Any] | None:
+    executable_steps = [step for step in plan if step.get("tool") and step.get("tool") != "none"]
+    if not objective.strip() or not executable_steps:
+        return None
+    normalized = re.sub(r"\s+", "-", objective.lower()).strip("-")
+    encoded = normalized.encode("unicode_escape").decode("ascii")
+    slug = re.sub(r"[^a-z0-9-]+", "-", encoded.lower()).strip("-")
+    if not slug:
+        slug = "skill"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+    slug = f"{slug}-{digest}"
+    skill = {
+        "name": slug,
+        "version": version,
+        "description": objective,
+        "plan": [
+            {
+                "action": step.get("action", ""),
+                "tool": step["tool"],
+                "arguments": step.get("arguments", {}),
+            }
+            for step in executable_steps
+        ],
+        "tools": sorted({step["tool"] for step in executable_steps}),
+    }
+    store.save(skill)
+    return skill
